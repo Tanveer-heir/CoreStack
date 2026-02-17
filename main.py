@@ -1084,6 +1084,69 @@ with the number of NREGA (MGNREGA) works done in that village, visualized as a s
 
 ═══════════════════════════════════════════════════════════════════════════════
 
+═══════════════════════════════════════════════════════════════════════════════
+
+**Query Type 12: "Cropping Intensity vs Rainfall Runoff Volume — 4 quadrant scatter plot"**
+This query computes two metrics per micro-watershed (MWS) and plots them against each other
+in a scatter plot with 4 quadrants (High/Low CI × High/Low Runoff).
+
+✅ TWO DATA LAYERS NEEDED (fetched from CoreStack in a SINGLE call):
+- **Cropping Intensity vector** (115 MWS, 54 cols): has `cropping_intensity_YYYY` columns (2017-2024).
+  Mean over years = mean_ci per MWS.
+- **Drought vector** (115 MWS, 258 cols): has weekly `rd` columns (format: `rdYY-M-D`).
+  These are weekly monsoon-season water-balance values per MWS (rainfall departure from normal, in mm).
+  Positive = above-normal rainfall (surplus/runoff potential). Negative = deficit.
+  Sum all `rd` columns per year → annual monsoon water surplus per MWS.
+  Multiply by `area_in_ha` × 10 → runoff volume in m³.
+  Average across years → mean annual runoff volume per MWS.
+
+🔴 MANDATORY: For this query type, COPY the code from EXAMPLE 10 below almost verbatim.
+
+**DATA COLUMNS:**
+- Cropping Intensity: `cropping_intensity_2017` through `cropping_intensity_2024` (8 years)
+- Drought `rd` columns: `rd17-5-21`, `rd17-5-28`, ..., `rd22-10-8` (145 weekly columns over 2017-2022)
+  Pattern: `rdYY-M-D` where YY = 2-digit year, M = month, D = day
+  Group by year prefix (first 4 chars: `rd17`, `rd18`, ..., `rd22`)
+
+**METHODOLOGY:**
+1. Call fetch_corestack_data ONCE → get vector_layers list
+2. Print ALL layer names
+3. Find and load: Cropping Intensity vector + Drought vector as GeoDataFrames
+4. Print columns of each to verify
+5. Compute mean cropping intensity per MWS: average `cropping_intensity_YYYY` across years
+6. Compute runoff volume per MWS:
+   a. Identify all `rd` columns (startswith 'rd' and contains '-')
+   b. Group by year: `rdYY-*` → group by `c[2:4]` (year digits)
+   c. For each year: `annual_sum = gdf[year_cols].sum(axis=1)` (total monsoon surplus in mm)
+   d. Average across years: `mean_annual_surplus` (mm)
+   e. Volume: `runoff_volume_m3 = mean_annual_surplus * area_in_ha * 10` (1 mm over 1 ha = 10 m³)
+7. Merge CI and Drought on `uid` column
+8. Drop MWS with negative mean runoff (net deficit = no harvestable runoff)
+9. Set thresholds: median of each axis
+10. Build scatter plot:
+    - X-axis: Mean Cropping Intensity (%)
+    - Y-axis: Mean Annual Runoff Volume (m³) — use LOG SCALE if max/min > 10
+    - Color by quadrant:
+      • Red = High CI + High Runoff (prioritize conservation)
+      • Blue = Low CI + High Runoff (untapped irrigation potential)
+      • Orange = High CI + Low Runoff (vulnerable, water-stressed crops)
+      • Gray = Low CI + Low Runoff
+    - Draw quadrant lines at median thresholds
+    - Annotate each point with MWS `uid`
+    - Show legend with quadrant labels + count of MWS in each
+    - Title with location and threshold values
+11. Export scatter plot PNG + GeoJSON with quadrant assignments
+
+⚠️ IMPORTANT NOTES:
+- `rd` columns are in the **Drought** layer, NOT the Cropping Intensity layer.
+- Always check columns with `[c for c in gdf.columns if c.startswith('rd')]`
+- Year grouping: `c[2:4]` extracts '17', '18', etc. Convert to int: `2000 + int(c[2:4])`
+- Some MWS may have negative mean annual surplus (net deficit years). These have zero harvestable runoff.
+  Either drop them or set their volume to 0 before plotting.
+- ⚠️ LOCATION: ALWAYS include location in fetch_corestack_data call.
+
+═══════════════════════════════════════════════════════════════════════════════
+
 Instructions:
 1. **CORESTACK PRIORITY (PRIMARY)**: For ANY query about India or Indian locations, you MUST call fetch_corestack_data FIRST to access CoreStack database. Available CoreStack layers:
    - Raster: {', '.join(CORESTACK_DATA_PRODUCTS['raster_layers'])}
@@ -1812,6 +1875,156 @@ For multi-region layers: Read ALL URLs, concat GeoDataFrames, then analyze.
 		export_gdf.to_file('./exports/scst_vs_nrega_villages.geojson', driver='GeoJSON')
 		print(f"GeoJSON exported to ./exports/scst_vs_nrega_villages.geojson")
 
+		# ╔══════════════════════════════════════════════════════════════╗
+		# ║ EXAMPLE 10: CI vs RUNOFF VOLUME — 4 QUADRANT SCATTER       ║
+		# ║ ⚠️ For Query Type 12, COPY THIS CODE ALMOST VERBATIM.       ║
+		# ║ Loads Cropping Intensity + Drought layers, computes metrics ║
+		# ╚══════════════════════════════════════════════════════════════╝
+		import os
+		os.makedirs('./exports', exist_ok=True)
+
+		# Step 1: Fetch data from CoreStack
+		data = fetch_corestack_data(query="Navalgund Dharwad Karnataka cropping intensity drought")
+		vector_layers = data['spatial_data']['vector_layers']
+
+		print("Available vector layers:")
+		for layer in vector_layers:
+			print(f"  - {{layer['layer_name']}}")
+
+		# Step 2: Load Cropping Intensity and Drought layers
+		ci_gdf = None
+		drought_gdf = None
+		for layer in vector_layers:
+			lname = layer['layer_name'].lower()
+			if 'intensity' in lname and ci_gdf is None:
+				print(f"Found Cropping Intensity layer: {{layer['layer_name']}}")
+				ci_gdf = pd.concat([gpd.read_file(u['url']) for u in layer['urls']], ignore_index=True)
+			if 'drought' in lname and 'causal' not in lname and drought_gdf is None:
+				print(f"Found Drought layer: {{layer['layer_name']}}")
+				drought_gdf = pd.concat([gpd.read_file(u['url']) for u in layer['urls']], ignore_index=True)
+
+		print(f"CI shape: {{ci_gdf.shape}}, columns: {{ci_gdf.columns.tolist()}}")
+		print(f"Drought shape: {{drought_gdf.shape}}")
+
+		# Step 3: Compute MEAN CROPPING INTENSITY per MWS (average over years)
+		ci_cols = [c for c in ci_gdf.columns if c.startswith('cropping_intensity_')]
+		print(f"CI year columns: {{ci_cols}}")
+		ci_gdf['mean_ci'] = ci_gdf[ci_cols].mean(axis=1)
+		print(f"Mean CI range: {{ci_gdf['mean_ci'].min():.1f}} to {{ci_gdf['mean_ci'].max():.1f}}")
+
+		# Step 4: Compute MEAN ANNUAL RUNOFF VOLUME per MWS from rd columns
+		# rd columns: rdYY-M-D (weekly monsoon water-balance values)
+		rd_cols = [c for c in drought_gdf.columns if c.startswith('rd') and '-' in c]
+		print(f"Total rd columns: {{len(rd_cols)}}")
+
+		# Group by year (c[2:4] = year digits)
+		rd_by_year = {{}}
+		for c in rd_cols:
+			yr = c[2:4]
+			if yr not in rd_by_year:
+				rd_by_year[yr] = []
+			rd_by_year[yr].append(c)
+
+		# Sum per year → annual monsoon surplus (mm)
+		annual_sum_cols = []
+		for yr in sorted(rd_by_year.keys()):
+			col_name = f'rd_sum_20{{yr}}'
+			drought_gdf[col_name] = drought_gdf[rd_by_year[yr]].sum(axis=1)
+			annual_sum_cols.append(col_name)
+			print(f"  Year 20{{yr}}: {{len(rd_by_year[yr])}} weeks, mean sum={{drought_gdf[col_name].mean():.0f}} mm")
+
+		# Mean across years → mean annual surplus (mm)
+		drought_gdf['mean_annual_surplus_mm'] = drought_gdf[annual_sum_cols].mean(axis=1)
+		# Volume = surplus_mm × area_in_ha × 10  (1 mm over 1 ha = 10 m³)
+		drought_gdf['runoff_volume_m3'] = drought_gdf['mean_annual_surplus_mm'] * drought_gdf['area_in_ha'] * 10
+		# Clip negative volumes to small positive (deficit MWS)
+		drought_gdf['runoff_volume_m3'] = drought_gdf['runoff_volume_m3'].clip(lower=1)
+		print(f"Runoff volume range: {{drought_gdf['runoff_volume_m3'].min():.0f}} to {{drought_gdf['runoff_volume_m3'].max():.0f}} m³")
+
+		# Step 5: Merge CI and Drought on uid
+		merged = ci_gdf[['uid', 'mean_ci', 'area_in_ha', 'geometry']].merge(
+			drought_gdf[['uid', 'mean_annual_surplus_mm', 'runoff_volume_m3']],
+			on='uid', how='inner'
+		)
+		print(f"Merged MWS count: {{len(merged)}}")
+
+		# Step 6: Set thresholds (median)
+		ci_thresh = merged['mean_ci'].median()
+		rv_thresh = merged['runoff_volume_m3'].median()
+		print(f"Thresholds — CI median: {{ci_thresh:.1f}}%, Runoff median: {{rv_thresh:.0f}} m³")
+
+		# Assign quadrants
+		def assign_quadrant(row):
+			if row['mean_ci'] >= ci_thresh and row['runoff_volume_m3'] >= rv_thresh:
+				return 'High CI + High Runoff'
+			elif row['mean_ci'] < ci_thresh and row['runoff_volume_m3'] >= rv_thresh:
+				return 'Low CI + High Runoff'
+			elif row['mean_ci'] >= ci_thresh and row['runoff_volume_m3'] < rv_thresh:
+				return 'High CI + Low Runoff'
+			else:
+				return 'Low CI + Low Runoff'
+		merged['quadrant'] = merged.apply(assign_quadrant, axis=1)
+		print(f"\nQuadrant counts:")
+		print(merged['quadrant'].value_counts().to_string())
+
+		# Step 7: Build scatter plot
+		import matplotlib
+		matplotlib.use('Agg')
+		import matplotlib.pyplot as plt
+		import numpy as np
+
+		quadrant_colors = {{
+			'High CI + High Runoff': 'red',
+			'Low CI + High Runoff': 'royalblue',
+			'High CI + Low Runoff': 'darkorange',
+			'Low CI + Low Runoff': 'gray'
+		}}
+
+		fig, ax = plt.subplots(figsize=(14, 10))
+		for quad, color in quadrant_colors.items():
+			subset = merged[merged['quadrant'] == quad]
+			if len(subset) > 0:
+				ax.scatter(subset['mean_ci'], subset['runoff_volume_m3'],
+						c=color, s=70, alpha=0.8, edgecolors='black', linewidth=0.5,
+						label=f'{{quad}} (n={{len(subset)}})')
+
+		# Annotate each point with uid
+		for _, row in merged.iterrows():
+			ax.annotate(row['uid'], (row['mean_ci'], row['runoff_volume_m3']),
+						fontsize=5, alpha=0.7, ha='left', va='bottom',
+						xytext=(3, 3), textcoords='offset points')
+
+		# Quadrant threshold lines
+		ax.axvline(ci_thresh, color='black', linestyle='--', alpha=0.5, linewidth=1)
+		ax.axhline(rv_thresh, color='black', linestyle='--', alpha=0.5, linewidth=1)
+
+		# Log scale on Y if spread is large
+		if merged['runoff_volume_m3'].max() / max(merged['runoff_volume_m3'].min(), 1) > 10:
+			ax.set_yscale('log')
+			ax.set_ylabel('Mean Annual Runoff Volume (m³, log scale)', fontsize=12)
+		else:
+			ax.set_ylabel('Mean Annual Runoff Volume (m³)', fontsize=12)
+
+		ax.set_xlabel('Mean Cropping Intensity (%)', fontsize=12)
+		ax.set_title(f'Micro-watershed: Cropping Intensity vs Harvestable Runoff Volume\nNavalgund, Dharwad, Karnataka | CI threshold={{ci_thresh:.1f}}%, Runoff threshold={{rv_thresh:.0f}} m³', fontsize=12)
+		ax.legend(fontsize=9, loc='upper left')
+		ax.grid(True, alpha=0.3)
+		plt.tight_layout()
+		plt.savefig('./exports/ci_vs_runoff_quadrant_scatter.png', dpi=200, bbox_inches='tight')
+		print(f"\nScatter plot saved to ./exports/ci_vs_runoff_quadrant_scatter.png")
+
+		# Step 8: Print top MWS in key quadrants
+		for quad in ['High CI + High Runoff', 'Low CI + High Runoff', 'High CI + Low Runoff']:
+			q_df = merged[merged['quadrant'] == quad][['uid', 'mean_ci', 'runoff_volume_m3', 'area_in_ha']].sort_values('runoff_volume_m3', ascending=False)
+			print(f"\n{{quad}} ({{len(q_df)}} MWS):")
+			print(q_df.head(10).to_string(index=False))
+
+		# Step 9: Export GeoJSON with quadrant assignments
+		export_gdf = gpd.GeoDataFrame(merged, geometry='geometry')
+		export_gdf = export_gdf[['uid', 'mean_ci', 'runoff_volume_m3', 'mean_annual_surplus_mm', 'area_in_ha', 'quadrant', 'geometry']]
+		export_gdf.to_file('./exports/ci_vs_runoff_quadrants.geojson', driver='GeoJSON')
+		print(f"GeoJSON exported to ./exports/ci_vs_runoff_quadrants.geojson")
+
 	elif data['success'] and data['data_type'] == 'timeseries':
 		# Access timeseries data
 		timeseries = data['timeseries_data']
@@ -1981,6 +2194,10 @@ if __name__ == "__main__":
 	print("Bot TEST")
 	print("="*70)
 
+	print("Running query #12 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+	print("="*70)
+	run_hybrid_agent("My tehsil navalgund of Dharwad, Karnataka is quite groundwater stressed. Find the top micro-watersheds that have high cropping intensity as well as a large rainfall runoff volume that can be harvested. Similarly, find those micro-watersheds that have a low cropping intensity but high runoff volume. Essentially build a neat scatterplot split into four quadrants of high/low cropping intensity and high/low runoff")
+
 
 	# print("Running query #1 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
 	# print("="*70)
@@ -2025,13 +2242,10 @@ if __name__ == "__main__":
 	# print("="*70)
 	# run_hybrid_agent("From the top-K earlier identified drought-sensitive and surface-water-sensitive microwatersheds in Navalgund, Dharwad, Karnataka, rank them based on their cropping intensity and surface water availability. Use weighted score: cropping_score = 3*triple_crop + 2*double_crop + 1*(single_kharif + single_non_kharif). Water score = 3*perennial_water + 2*winter_water + 1*monsoon_water. Read past exports from ./exports/ to get the MWS UIDs.")
 
-	print("Running query #11 from CSV (Navalgund, Dharwad, Karnataka)...")
-	print("="*70)
-	run_hybrid_agent("In my Navalgund tehsil of Dharwad, Karnataka, compare the SC/ST% population of villages against the number of NREGA works done in the villages. Build a scatter plot.")
-
-    # print("Running query #7 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+	# print("Running query #11 from CSV (Navalgund, Dharwad, Karnataka)...")
 	# print("="*70)
-	# run_hybrid_agent("find all microwatersheds in Navalgund tehsil, Dharwad district in Karnataka, with highest surface water availability senstivity to drought")
+	# run_hybrid_agent("In my Navalgund tehsil of Dharwad, Karnataka, compare the SC/ST% population of villages against the number of NREGA works done in the villages. Build a scatter plot.")
+
 
     # print("Running query #7 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
 	# print("="*70)
