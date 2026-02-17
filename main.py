@@ -742,32 +742,50 @@ FALLBACK: If custom time period (e.g., "2018-2024"):
 - Use land_use_land_cover_raster for specific years
 - Compare class 6 (trees) presence across years manually
 
-**Query Type 4: "Change in Urbanization / Land Cover Change in [Village]"**
-✅ CORRECT APPROACH: Compare LULC rasters across two years (LULC comparison)
+**Query Type 4: "How much cropland turned into built-up / Land Cover Change in [Location]"**
+✅ CORRECT APPROACH: Compare LULC level_3 rasters across two years
 ⛔ NEVER use any layer with "Urbanization" or "change_urbanization" in the name. Those layers return 404.
 ⛔ NEVER search for "change_urbanization_raster". It does NOT work.
 
-INSTEAD, you MUST:
-1. From the fetched CoreStack data, find LULC raster layers (layer_name contains "LULC" or dataset_name contains "LULC_level_3")
-   - Example layer names: LULC_17_18_dharwad_navalgund_level_3, LULC_24_25_dharwad_navalgund_level_3
-2. Pick the EARLIEST available LULC (e.g., LULC_17_18) and the MOST RECENT (e.g., LULC_24_25)
-3. Download BOTH rasters using requests.get() and save to ./exports/
-4. Open both with rasterio, read band 1
-5. LULC class codes:
-   - 0: Background, 1: Built-up, 2: Water (Kharif), 3: Water (Kharif+Rabi)
-   - 4: Water (Kharif+Rabi+Zaid), 6: Tree/Forests, 7: Barrenlands
-   - 8: Single cropping cropland, 9: Single Non-Kharif cropping cropland
-   - 10: Double cropping cropland, 11: Triple cropping cropland, 12: Shrub_Scrub
-6. Reproject to EPSG:32643 for area calculation
-7. Compute per-class pixel count and area (hectares) for BOTH years
-8. Create a CHANGE MAP: where old != new, highlight changed pixels
-9. For urbanization: count pixels that became class 1 (Built-up) in recent LULC but were NOT class 1 in old LULC
-10. Export: change map GeoTIFF, area comparison CSV, visualization PNG
+🔴 MANDATORY: For this query type, COPY the code from EXAMPLE 2b below almost verbatim.
 
-WHY LULC COMPARISON?
-- Pre-computed change rasters return 404 and are unreliable
-- LULC comparison gives you FULL CONTROL over time period and class transitions
-- You get BOTH area statistics AND a spatial change map
+⚠️ SANDBOX CONSTRAINTS (CRITICAL — violations cause instant failure):
+- NEVER use bare `open()` — it is BLOCKED by the sandbox executor. Use `rasterio.MemoryFile(bytes)` to read rasters from downloaded bytes.
+- NEVER reproject to UTM using `calculate_default_transform` — the LULC rasters are 4911x5826 pixels in EPSG:4326 (~0.00009° resolution). Reprojecting to UTM with degree-resolution causes a 300+ PB memory allocation crash.
+- For area calculation, use degree-based math: `px_area = (dx_deg * 111320 * cos(lat_rad)) * (dy_deg * 110540) / 10000` hectares.
+- `rasterio.open(path, 'w', ...)` IS allowed (it's a module method, not bare open).
+- `plt.savefig(...)` IS allowed.
+
+**KEY FACTS:**
+- LULC rasters are in `raster_layers` from fetch_corestack_data, with dataset_name `LULC_level_3`
+- Layer names follow: `LULC_YY_YY_<district>_<tehsil>_level_3` (e.g., LULC_18_19, LULC_24_25)
+- Both rasters share the same grid (same shape, same CRS EPSG:4326) — NO reprojection needed for comparison
+- Rasters are float64 with NaN as nodata. Cast to int or use np.nan_to_num()
+- For area: each pixel is ~0.00009 degrees. At 15.5°N: 1 px ≈ 0.0095 ha.
+
+**LULC Class Codes (level 3):**
+- 1: Built-up, 2: Water (Kharif), 3: Water (Kharif+Rabi), 4: Water (Kharif+Rabi+Zaid)
+- 6: Tree/Forests, 7: Barrenlands
+- 8: Single cropping cropland, 9: Single Non-Kharif cropping cropland
+- 10: Double cropping cropland, 11: Triple cropping cropland, 12: Shrub_Scrub
+- Cropland classes = {8, 9, 10, 11}
+
+**METHODOLOGY:**
+1. Call fetch_corestack_data ONCE → get raster_layers list
+2. Print ALL raster layer names: `for l in raster_layers: print(l['layer_name'])`
+3. Find LULC level_3 layers: match `'lulc' in name.lower() and 'level_3' in name.lower()`
+4. Sort by year: extract YY_YY from name, pick EARLIEST matching user's "since YYYY" and MOST RECENT
+   - "since 2018" → use LULC_18_19 (old) vs LULC_24_25 (new)
+5. Download BOTH rasters: `requests.get(url)` → save to `./exports/lulc_old.tif`, `./exports/lulc_new.tif`
+6. Open with rasterio, read band 1, replace NaN with 0: `np.nan_to_num(data, nan=0).astype(int)`
+7. Create change mask: cropland in old (classes 8,9,10,11) AND built-up in new (class 1)
+   `crop_to_builtup = np.isin(old_data, [8,9,10,11]) & (new_data == 1)`
+8. Compute area using degree-based math (NEVER reproject to UTM):
+   `px_area_ha = (dx_deg * 111320 * cos(lat)) * (dy_deg * 110540) / 10000`
+9. Create a change raster (0=no change, 1=crop→built-up) and save as GeoTIFF
+10. Create visualization PNG with the change map overlaid
+11. Print total conversion area in hectares
+12. Export: change GeoTIFF + PNG + area stats
 
 **Query Type 5: "Microwatersheds with highest cropping sensitivity to drought"**
 ✅ CORRECT LAYERS: drought layer + cropping intensity layer (both spatial vectors from SAME fetch)
@@ -778,7 +796,7 @@ WHY LULC COMPARISON?
    The ONLY column to group by after sjoin is `id_drought` (the drought GDF's `id` column with lsuffix).
    The sjoin MUST use: `lsuffix='drought', rsuffix='crop'`
    After sjoin, print columns: `print(joined.columns.tolist())` to verify.
-
+T:\CS Journey\Projectss\Project\Core_Stack\CoreStack\main.py
 ⚠️ CRITICAL LAYER NAME MATCHING:
 - The drought layer name is `"Drought (dharwad_navalgund_drought)"` — match with `'drought' in name.lower()`
 - The cropping layer name is `"Cropping Intensity (dharwad_navalgund_intensity)"` — match with `'cropping' in name.lower() and 'intensity' in name.lower()`
@@ -1304,6 +1322,156 @@ For multi-region layers: Read ALL URLs, concat GeoDataFrames, then analyze.
 					pixel_area = src.transform[0] * abs(src.transform[4])
 					loss_area_ha = loss_area_pixels * pixel_area / 10000
 					print(f"Tree cover loss: {{loss_area_ha:.2f}} hectares")
+
+		# ╔══════════════════════════════════════════════════════════════╗
+		# ║ EXAMPLE 2b: CROPLAND → BUILT-UP CHANGE DETECTION             ║
+		# ║ ⚠️ For Query Type 4, COPY THIS CODE ALMOST VERBATIM.         ║
+		# ║ Downloads 2 LULC rasters, computes crop→built-up change      ║
+		# ║ ⚠️ NEVER use bare open() — it is BLOCKED by the sandbox.     ║
+		# ║    Use rasterio.MemoryFile for reading raster bytes.         ║
+		# ║    Use rasterio.open() for writing GeoTIFFs (it's allowed).  ║
+		# ║ ⚠️ NEVER reproject to UTM — the grid is too large and will   ║
+		# ║    cause a 300+ PB memory allocation error. Instead, compute ║
+		# ║    area using degree-based math (accurate to <1% at 15°N).   ║
+		# ╚══════════════════════════════════════════════════════════════╝
+		import os, requests, rasterio, numpy as np, math
+		os.makedirs('./exports', exist_ok=True)
+
+		# Step 1: Fetch data from CoreStack
+		data = fetch_corestack_data(query="Navalgund Dharwad Karnataka LULC raster")
+		raster_layers = data['spatial_data']['raster_layers']
+
+		print("Available raster layers:")
+		for layer in raster_layers:
+			print(f"  - {{layer['layer_name']}}")
+
+		# Step 2: Find LULC level_3 rasters for old and new years
+		lulc_layers = []
+		for layer in raster_layers:
+			lname = layer['layer_name'].lower()
+			if 'lulc' in lname and 'level_3' in lname:
+				lulc_layers.append(layer)
+
+		# Sort by year code (extract the YY_YY part) to find earliest and latest
+		import re as re_mod
+		def extract_year(name):
+			m = re_mod.search(r'lulc_(\d{{2}})_(\d{{2}})', name.lower())
+			if m:
+				return int(m.group(1))
+			return 0
+
+		lulc_layers.sort(key=lambda l: extract_year(l['layer_name']))
+		print(f"Found {{len(lulc_layers)}} LULC level_3 layers")
+
+		# Pick old (closest to query year, e.g., 2018 -> LULC_18_19) and newest
+		old_layer = lulc_layers[0]   # earliest
+		new_layer = lulc_layers[-1]  # most recent
+		# If user specifies a year (e.g., 2018), find closest match
+		for ll in lulc_layers:
+			if '18_19' in ll['layer_name']:
+				old_layer = ll
+				break
+
+		print(f"Old LULC: {{old_layer['layer_name']}}")
+		print(f"New LULC: {{new_layer['layer_name']}}")
+
+		# Step 3: Download both rasters into memory (NEVER use bare open())
+		old_url = old_layer['urls'][0]['url']
+		new_url = new_layer['urls'][0]['url']
+
+		r_old_bytes = requests.get(old_url, timeout=120).content
+		print(f"Downloaded old LULC: {{len(r_old_bytes)}} bytes")
+		r_new_bytes = requests.get(new_url, timeout=120).content
+		print(f"Downloaded new LULC: {{len(r_new_bytes)}} bytes")
+
+		# Step 4: Open rasters using rasterio.MemoryFile (sandbox-safe)
+		with rasterio.MemoryFile(r_old_bytes) as memfile:
+			with memfile.open() as src_old:
+				old_data = np.nan_to_num(src_old.read(1), nan=0).astype(int)
+				old_meta = src_old.meta.copy()
+				old_transform = src_old.transform
+				old_crs = src_old.crs
+				old_bounds = src_old.bounds
+				print(f"Old raster shape: {{old_data.shape}}, CRS: {{old_crs}}")
+
+		with rasterio.MemoryFile(r_new_bytes) as memfile:
+			with memfile.open() as src_new:
+				new_data = np.nan_to_num(src_new.read(1), nan=0).astype(int)
+				print(f"New raster shape: {{new_data.shape}}")
+
+		# Step 5: Compute cropland-to-built-up change
+		#   Cropland classes: 8 (single), 9 (single non-kharif), 10 (double), 11 (triple)
+		#   Built-up class: 1
+		crop_classes = [8, 9, 10, 11]
+		crop_old = np.isin(old_data, crop_classes)
+		builtup_new = (new_data == 1)
+		crop_to_builtup = (crop_old & builtup_new).astype(np.uint8)
+		change_pixels = int(crop_to_builtup.sum())
+		print(f"Crop -> Built-up pixels: {{change_pixels}}")
+
+		# Step 6: Compute area using degree-based math (NO UTM reprojection!)
+		# UTM reprojection would create a 300+ PB grid and crash.
+		# Instead: pixel_area = (dx_deg * m_per_deg_lon) * (dy_deg * m_per_deg_lat)
+		dx_deg = abs(old_transform[0])
+		dy_deg = abs(old_transform[4])
+		center_lat = (old_bounds.bottom + old_bounds.top) / 2
+		m_per_deg_lat = 110540.0  # meters per degree latitude (approx constant)
+		m_per_deg_lon = 111320.0 * math.cos(math.radians(center_lat))
+		px_width_m = dx_deg * m_per_deg_lon
+		px_height_m = dy_deg * m_per_deg_lat
+		px_area_m2 = px_width_m * px_height_m
+		px_area_ha = px_area_m2 / 10000
+		total_change_ha = change_pixels * px_area_ha
+		print(f"Pixel size: {{px_width_m:.2f}} x {{px_height_m:.2f}} m = {{px_area_ha:.5f}} ha/px")
+		print(f"Crop -> Built-up area: {{total_change_ha:.2f}} hectares")
+
+		# Also compute total cropland area (old) and total built-up area (both years)
+		total_crop_old_px = int(crop_old.sum())
+		total_builtup_old_px = int((old_data == 1).sum())
+		total_builtup_new_px = int((new_data == 1).sum())
+		print(f"Total cropland (old): {{total_crop_old_px * px_area_ha:.0f}} ha")
+		print(f"Total built-up (old): {{total_builtup_old_px * px_area_ha:.0f}} ha")
+		print(f"Total built-up (new): {{total_builtup_new_px * px_area_ha:.0f}} ha")
+
+		# Step 7: Save change raster as GeoTIFF (rasterio.open is allowed)
+		change_meta = old_meta.copy()
+		change_meta.update(dtype='uint8', count=1, nodata=0)
+		with rasterio.open('./exports/crop_to_builtup_change.tif', 'w', **change_meta) as dst:
+			dst.write(crop_to_builtup, 1)
+		print(f"Change raster saved: ./exports/crop_to_builtup_change.tif")
+
+		# Step 8: Visualization PNG
+		import matplotlib
+		matplotlib.use('Agg')
+		import matplotlib.pyplot as plt
+		from matplotlib.colors import ListedColormap
+
+		fig, axes = plt.subplots(1, 3, figsize=(20, 7))
+
+		# Subplot 1: Old LULC
+		cmap_lulc = ListedColormap(['white', 'red', 'cyan', 'blue', 'darkblue', 'white',
+			'green', 'sandybrown', 'yellow', 'khaki', 'orange', 'darkgreen', 'olive'])
+		axes[0].imshow(old_data, cmap=cmap_lulc, vmin=0, vmax=12)
+		axes[0].set_title(f'LULC {{old_layer["layer_name"][:12]}}')
+		axes[0].axis('off')
+
+		# Subplot 2: New LULC
+		axes[1].imshow(new_data, cmap=cmap_lulc, vmin=0, vmax=12)
+		axes[1].set_title(f'LULC {{new_layer["layer_name"][:12]}}')
+		axes[1].axis('off')
+
+		# Subplot 3: Change map (crop->built-up highlighted in red)
+		change_vis = np.zeros((*old_data.shape, 3), dtype=np.uint8)
+		change_vis[..., :] = 200  # light gray background
+		change_vis[crop_to_builtup == 1] = [255, 0, 0]  # red for crop->built-up
+		axes[2].imshow(change_vis)
+		axes[2].set_title(f'Crop to Built-up: {{total_change_ha:.1f}} ha')
+		axes[2].axis('off')
+
+		plt.suptitle(f'Cropland to Built-up Conversion\nNavalgund, Dharwad, Karnataka', fontsize=14)
+		plt.tight_layout()
+		plt.savefig('./exports/crop_to_builtup_change.png', dpi=200, bbox_inches='tight')
+		print(f"Visualization saved: ./exports/crop_to_builtup_change.png")
 
 		# EXAMPLE 3: DROUGHT + VILLAGE NAMES (Spatial Join with Admin Boundaries)
 		# Step 1: Find and load drought_frequency_vector
