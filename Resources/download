@@ -1,0 +1,1324 @@
+{
+  "swagger": "2.0",
+  "info": {
+    "title": "CoRE Stack APIs",
+    "description": "CoRE Stack API",
+    "termsOfService": "",
+    "contact": {
+      "email": "support@core-stack.org"
+    },
+    "license": {
+      "name": ""
+    },
+    "version": "v1"
+  },
+  "host": "geoserver.core-stack.org",
+  "schemes": [
+    "https"
+  ],
+  "basePath": "/api/v1",
+  "consumes": [
+    "application/json"
+  ],
+  "produces": [
+    "application/json"
+  ],
+  "securityDefinitions": {
+    "Basic": {
+      "type": "basic"
+    }
+  },
+  "security": [
+    {
+      "Basic": []
+    }
+  ],
+  "paths": {
+    "/auth/token/refresh/": {
+      "post": {
+        "operationId": "auth_token_refresh_create",
+        "description": "Takes a refresh type JSON web token and returns an access type JSON web\ntoken if the refresh token is valid.",
+        "parameters": [
+          {
+            "name": "data",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/TokenRefresh"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "",
+            "schema": {
+              "$ref": "#/definitions/TokenRefresh"
+            }
+          }
+        },
+        "tags": [
+          "auth"
+        ]
+      },
+      "parameters": []
+    },
+    "/get_active_locations/": {
+      "get": {
+        "operationId": "generate_active_locations",
+        "summary": "Get Active Locations",
+        "description": "\nReturn activated locations data.\n\n**Response dataset details:**\n```\n{\n    \"state_name\": {\n        \"districts\": {\n            \"district_name\": {\n                \"tehsils\": [\"tehsil1\", \"tehsil2\"]\n            }\n        }\n    }\n}\n```\n",
+        "parameters": [
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "description": "API Key in format: <your-api-key>",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success - Returns activated locations data",
+            "examples": {
+              "application/json": {
+                "uttar_pradesh": {
+                  "districts": {
+                    "bara_banki": {
+                      "tehsils": [
+                        "fatehpur",
+                        "nawabganj"
+                      ]
+                    },
+                    "lucknow": {
+                      "tehsils": [
+                        "mohanlalganj",
+                        "malihabad"
+                      ]
+                    }
+                  }
+                },
+                "jharkhand": {
+                  "districts": {
+                    "deoghar": {
+                      "tehsils": [
+                        "devipur",
+                        "sarwan"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized - Invalid or missing API key"
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "examples": {
+              "application/json": {
+                "Exception": "Error message details"
+              }
+            }
+          }
+        },
+        "tags": [
+          "Dataset APIs"
+        ]
+      },
+      "parameters": []
+    },
+    "/get_admin_details_by_latlon/": {
+      "get": {
+        "operationId": "get_admin_details_by_latlon",
+        "summary": "Get Admin Details by Lat Lon",
+        "description": "\nRetrieve admin data based on given latitude and longitude coordinates.\n\n**Response dataset details:**\n```\n[\n    \"State\": \"State name\",\n    \"District\": \"District name\",\n    \"Tehsil\": \"Tehsil name\"\n]\n```\n",
+        "parameters": [
+          {
+            "name": "latitude",
+            "in": "query",
+            "description": "Latitude coordinate (-90 to 90)",
+            "required": true,
+            "type": "number"
+          },
+          {
+            "name": "longitude",
+            "in": "query",
+            "description": "Longitude coordinate (-180 to 180)",
+            "required": true,
+            "type": "number"
+          },
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "description": "API Key in format: <your-api-key>",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success - It will return JSON data having admin details.",
+            "examples": {
+              "application/json": {
+                "State": "UTTAR PRADESH",
+                "District": "JAUNPUR",
+                "Tehsil": "BADLAPUR"
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request - Both 'latitude' and 'longitude' parameters are required. OR Latitude and longitude must be valid numbers(float)."
+          },
+          "401": {
+            "description": "Unauthorized - Invalid or missing API key"
+          },
+          "404": {
+            "description": "Not Found - Latitude and longitude is not in SOI boundary."
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "tags": [
+          "Dataset APIs"
+        ]
+      },
+      "parameters": []
+    },
+    "/get_generated_layer_urls/": {
+      "get": {
+        "operationId": "get_generated_layer_urls",
+        "summary": "Get Generated Layer Url",
+        "description": "\nRetrieve generated layer URLs for a given state, district, and tehsil.\n\n**Example Response:**\n```\n    [\n            \"layer_name\": \"Name of the layer\",\n            \"layer_type\": \"Vector/ Raster\",\n            \"layer_url\": \"Geoserver url for the layer\",\n            \"layer_version\": \"Version of the layer\",\n            \"style_url\": \"Url for the style\",\n            \"gee_asset_path\": \"GEE Asset path for the layer\"\n    ]\n```\n",
+        "parameters": [
+          {
+            "name": "state",
+            "in": "query",
+            "description": "Name of the state (e.g. 'Uttar Pradesh')",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "district",
+            "in": "query",
+            "description": "Name of the district (e.g. 'Jaunpur')",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "tehsil",
+            "in": "query",
+            "description": "Name of the tehsil (e.g. 'Badlapur')",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "description": "API Key in format: <your-api-key>",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success - It will return JSON data for the generated layers.",
+            "examples": {
+              "application/json": [
+                {
+                  "layer_name": "SOGE",
+                  "layer_type": "vector",
+                  "layer_url": "https://geoserver.core-stack.org:8443/geoserver/soge/ows?service=WFS&version=1.0.0&request=GetFeature&typeName=soge:soge_vector_nalanda_hilsa&outputFormat=application/json",
+                  "layer_version": "1.0",
+                  "style_url": "https://github.com/core-stack-org/QGIS-Styles/blob/main/Hydrology/SOGE_style.qml",
+                  "gee_asset_path": "projects/ee-corestackdev/assets/apps/mws/bihar/nalanda/hilsa/soge_vector_nalanda_hilsa"
+                },
+                {
+                  "layer_name": "Drainage",
+                  "layer_type": "vector",
+                  "layer_url": "https://geoserver.core-stack.org:8443/geoserver/drainage/ows?service=WFS&version=1.0.0&request=GetFeature&typeName=drainage:nalanda_hilsa&outputFormat=application/json",
+                  "layer_version": "1.0",
+                  "style_url": "https://github.com/core-stack-org/QGIS-Styles/blob/main/Hydrology/Drainage-Layer-Style.qml",
+                  "gee_asset_path": "projects/ee-corestackdev/assets/apps/mws/bihar/nalanda/hilsa/drainage_lines_nalanda_hilsa"
+                }
+              ]
+            }
+          },
+          "400": {
+            "description": "Bad Request - 'state', 'district', and 'tehsil' parameters are required. OR State/District/Tehsil must contain only letters, spaces, and underscores"
+          },
+          "401": {
+            "description": "Unauthorized - Invalid or missing API key"
+          },
+          "404": {
+            "description": "Not Found - Data not found for this state, district, tehsil."
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "tags": [
+          "Dataset APIs"
+        ]
+      },
+      "parameters": []
+    },
+    "/get_mws_data/": {
+      "get": {
+        "operationId": "get_mws_data",
+        "summary": "Get MWS Time Series Data",
+        "description": "\nRetrieve MWS time series data, including ET, Runoff, and Precipitation for a given state, district, tehsil, and MWS ID.\n\n**Response dataset details:**\n```\n{\n    \"mws_id\": \"12_208104\",\n    \"time_series\": [\n        {\n            \"date\": \"2024-01-01\",\n            \"et\": 2.5,\n            \"runoff\": 1.3,\n            \"precipitation\": 10.2\n        },\n        {\n            \"date\": \"2024-01-15\",\n            \"et\": 3.1,\n            \"runoff\": 0.8,\n            \"precipitation\": 5.4\n        }\n    ]\n}\n```\n",
+        "parameters": [
+          {
+            "name": "state",
+            "in": "query",
+            "description": "Name of the state (e.g. 'Uttar Pradesh')",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "district",
+            "in": "query",
+            "description": "Name of the district (e.g. 'Jaunpur')",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "tehsil",
+            "in": "query",
+            "description": "Name of the tehsil (e.g. 'Badlapur')",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "mws_id",
+            "in": "query",
+            "description": "Unique MWS identifier (e.g. '12_234647')",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "description": "API Key in format: <your-api-key>",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success - Returns MWS time series data",
+            "examples": {
+              "application/json": {
+                "mws_id": "12_208104",
+                "time_series": [
+                  {
+                    "date": "2024-01-01",
+                    "et": 2.5,
+                    "runoff": 1.3,
+                    "precipitation": 10.2
+                  },
+                  {
+                    "date": "2024-01-15",
+                    "et": 3.1,
+                    "runoff": 0.8,
+                    "precipitation": 5.4
+                  }
+                ]
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request - Missing required parameters or invalid format",
+            "examples": {
+              "application/json": {
+                "error": "'state', 'district', 'tehsil', and 'mws_id' parameters are required."
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized - Invalid or missing API key"
+          },
+          "404": {
+            "description": "Not Found - MWS ID not found",
+            "examples": {
+              "application/json": {
+                "error": "Data not found for the given mws_id"
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "examples": {
+              "application/json": {
+                "Exception": "Error message details"
+              }
+            }
+          }
+        },
+        "tags": [
+          "Dataset APIs"
+        ]
+      },
+      "parameters": []
+    },
+    "/get_mws_geometries/": {
+      "get": {
+        "operationId": "get_mws_geometries",
+        "summary": "Get MWS Geometry",
+        "description": "\nRetrieve MWS geometry/polygon data for a given state, district, tehsil, and MWS ID (uid).\n\n**Response format:**\nReturns a GeoJSON geometry object containing the polygon coordinates of the MWS boundary.\n\n**Example response:**\n```json\n{\n    \"type\": \"MultiPolygon\",\n    \"coordinates\": [\n        [\n            [\n                [88.35529485, 21.85344786],\n                [88.35556238, 21.85344778],\n                [88.35556238, 21.84806127],\n                [88.35582991, 21.84806119],\n                [88.35582991, 21.84644254],\n                [88.35556238, 21.84644262],\n                [88.35556238, 21.8450959]\n            ]\n        ]\n    ]\n}\n```\n\n**Note:** This API returns only the raw geometry object without any wrapper.\nThe coordinates follow the [GeoJSON format](https://geojson.org/) with longitude, latitude pairs.\n",
+        "parameters": [
+          {
+            "name": "state",
+            "in": "query",
+            "description": "Name of the state (e.g. 'Uttar Pradesh')",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "district",
+            "in": "query",
+            "description": "Name of the district (e.g. 'Jaunpur')",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "tehsil",
+            "in": "query",
+            "description": "Name of the tehsil (e.g. 'Badlapur')",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "mws_id",
+            "in": "query",
+            "description": "Unique MWS identifier (e.g. '12_234647')",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "description": "API Key in format: <your-api-key>",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success - Returns MWS geometry/polygon data",
+            "examples": {
+              "application/json": {
+                "type": "MultiPolygon",
+                "coordinates": [
+                  [
+                    [
+                      [
+                        88.35529485,
+                        21.85344786
+                      ],
+                      [
+                        88.35556238,
+                        21.85344778
+                      ],
+                      [
+                        88.35556238,
+                        21.84806127
+                      ],
+                      [
+                        88.35582991,
+                        21.84806119
+                      ],
+                      [
+                        88.35582991,
+                        21.84644254
+                      ],
+                      [
+                        88.35556238,
+                        21.84644262
+                      ],
+                      [
+                        88.35556238,
+                        21.8450959
+                      ]
+                    ]
+                  ]
+                ]
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request - Missing required parameters or invalid format",
+            "examples": {
+              "application/json": {
+                "error": "'state', 'district', 'tehsil', and 'mws_id' parameters are required."
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized - Invalid or missing API key",
+            "examples": {
+              "application/json": {
+                "error": "Authentication credentials were not provided."
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found - MWS ID not found",
+            "examples": {
+              "application/json": {
+                "error": "No MWS found with uid: 12_339480"
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "examples": {
+              "application/json": {
+                "error": "Internal server error: Unexpected error occurred"
+              }
+            }
+          }
+        },
+        "tags": [
+          "Dataset APIs"
+        ]
+      },
+      "parameters": []
+    },
+    "/get_mws_kyl_indicators/": {
+      "get": {
+        "operationId": "get_mws_kyl_indicators",
+        "summary": "Get MWS KYL Indicators",
+        "description": "\nRetrieve KYL indicator data for a specific MWS ID in a given state, district, and tehsil.\n\n**Example Response:**\n```\n    [\n        {\n            \"mws_id\": \"MWS id\",\n            \"terraincluster_id\": \"Cluster id\",\n            \"avg_precipitation\": \"Average precipitation in mm\",\n            \"cropping_intensity_trend\": \"Cropping intensity trend value\",\n            \"cropping_intensity_avg\": \"Average cropping Intensity\",\n            \"avg_single_cropped\": \"Average Single cropped area\",\n            \"avg_double_cropped\": \"Average Double cropped area\",\n            \"avg_triple_cropped\": \"Average Triple cropped area\",\n            \".................\": \".................\",\n            \"avg_number_dry_spell\": \"Average number of dry spell\",\n            \"avg_runoff\": \"Average runoff\",\n            \"total_nrega_assets\": \"Total nrega assets\"\n        }\n    ]\n```\n",
+        "parameters": [
+          {
+            "name": "state",
+            "in": "query",
+            "description": "Name of the state (e.g. 'Uttar Pradesh')",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "district",
+            "in": "query",
+            "description": "Name of the district (e.g. 'Jaunpur')",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "tehsil",
+            "in": "query",
+            "description": "Name of the tehsil (e.g. 'Badlapur')",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "mws_id",
+            "in": "query",
+            "description": "Unique MWS identifier (e.g. '12_234647')",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "description": "API Key in format: <your-api-key>",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success - It will return JSON data of the KYL Indicator for the mws_id.",
+            "examples": {
+              "application/json": [
+                {
+                  "mws_id": "12_234647",
+                  "terraincluster_id": 1,
+                  "avg_precipitation": 764.4457,
+                  "cropping_intensity_trend": 0,
+                  "cropping_intensity_avg": 1.7417,
+                  "avg_single_cropped": 8.2647,
+                  "avg_double_cropped": 80.1709,
+                  "avg_triple_cropped": 1.8198,
+                  "..................": ".......",
+                  "avg_number_dry_spell": 2.1667,
+                  "avg_runoff": 167.7886,
+                  "total_nrega_assets": 550
+                }
+              ]
+            }
+          },
+          "400": {
+            "description": "Bad Request - 'state', 'district', 'tehsil', and 'mws_id' parameters are required. OR State/District/Tehsil must contain only letters, spaces, and underscores OR MWS id can only contain numbers and underscores"
+          },
+          "401": {
+            "description": "Unauthorized - Invalid or missing API key"
+          },
+          "404": {
+            "description": "Not Found - Data not found for this state, district, tehsil. OR Not Found - Data not found for the given mws_id."
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "tags": [
+          "Dataset APIs"
+        ]
+      },
+      "parameters": []
+    },
+    "/get_mws_report/": {
+      "get": {
+        "operationId": "get_mws_report",
+        "summary": "Get MWS Report url",
+        "description": "\nRetrieve MWS report url for a given state, district, tehsil and mws_id.\n\n**Response dataset details:**\n```\n    [\n        \"Mws_report_url\": \"Url for the MWS report\"\n    ]\n```\n",
+        "parameters": [
+          {
+            "name": "state",
+            "in": "query",
+            "description": "Name of the state (e.g. 'Uttar Pradesh')",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "district",
+            "in": "query",
+            "description": "Name of the district (e.g. 'Jaunpur')",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "tehsil",
+            "in": "query",
+            "description": "Name of the tehsil (e.g. 'Badlapur')",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "mws_id",
+            "in": "query",
+            "description": "Unique MWS identifier (e.g. '12_234647')",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "description": "API Key in format: <your-api-key>",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success - It will return JSON having mws report url.",
+            "examples": {
+              "application/json": {
+                "Mws_report_url": "http://127.0.0.1:8000/api/v1/generate_mws_report/?state=uttar_pradesh&district=bara_banki&block=fatehpur&uid=12_208104"
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request - 'state', 'district', 'tehsil', and 'mws_id' parameters are required. OR State/District/Tehsil must contain only letters, spaces, and underscores OR MWS id can only contain numbers and underscores"
+          },
+          "401": {
+            "description": "Unauthorized - Invalid or missing API key"
+          },
+          "404": {
+            "description": "Not Found - Data not found for the given mws_id OR Data not found for this state, district, tehsil. OR Mws Layer not found for the given location."
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "tags": [
+          "Dataset APIs"
+        ]
+      },
+      "parameters": []
+    },
+    "/get_mwsid_by_latlon/": {
+      "get": {
+        "operationId": "get_mwsid_by_latlon",
+        "summary": "Get MWSID by Lat Lon",
+        "description": "\nRetrieve MWS ID data based on given latitude and longitude coordinates.\n\n**Response dataset details:**\n```\n[\n    \"uid\": \"MWS_id\"\n    \"State\": \"State name\",\n    \"District\": \"District name\",\n    \"Tehsil\": \"Tehsil name\"\n]\n```\n",
+        "parameters": [
+          {
+            "name": "latitude",
+            "in": "query",
+            "description": "Latitude coordinate (-90 to 90)",
+            "required": true,
+            "type": "number"
+          },
+          {
+            "name": "longitude",
+            "in": "query",
+            "description": "Longitude coordinate (-180 to 180)",
+            "required": true,
+            "type": "number"
+          },
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "description": "API Key in format: <your-api-key>",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success - It will return JSON data having admin detail with mws_id.",
+            "examples": {
+              "application/json": {
+                "uid": "12_234647",
+                "state": "UTTAR PRADESH",
+                "district": "JAUNPUR",
+                "tehsil": "BADLAPUR"
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request - Invalid parameters"
+          },
+          "401": {
+            "description": "Unauthorized - Invalid or missing API key"
+          },
+          "404": {
+            "description": "Not Found - Data not found"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "tags": [
+          "Dataset APIs"
+        ]
+      },
+      "parameters": []
+    },
+    "/get_tehsil_data/": {
+      "get": {
+        "operationId": "get_tehsil_data",
+        "summary": "Get Tehsil Data",
+        "description": "\nRetrieve tehsil-level JSON data for a given state, district, and tehsil.\n\n**Response dataset details:**\n```\n    [\n       \"aquifer_vector\": [\n            {\n                \"uid\": \"MWS_id\",\n                \"area_in_ha\": \"Area for the mws\",\n                \"aquifer_class\": \"Class for the aquifer\",\n                \"principle_aq_alluvium_percent\": \"Total percentage area under aquifer class\",\n                \"principle_aq_banded gneissic complex_percent\": \"Total percentage area under aquifer class\"\n            }\n          ]  \n    ]\n```\n",
+        "parameters": [
+          {
+            "name": "state",
+            "in": "query",
+            "description": "Name of the state (e.g. 'Uttar Pradesh')",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "district",
+            "in": "query",
+            "description": "Name of the district (e.g. 'Jaunpur')",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "tehsil",
+            "in": "query",
+            "description": "Name of the tehsil (e.g. 'Badlapur')",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "description": "API Key in format: <your-api-key>",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success - It will return JSON data for the tehsil.",
+            "examples": {
+              "application/json": {
+                "aquifer_vector": [
+                  {
+                    "uid": "12_207597",
+                    "area_in_ha": 2336.11,
+                    "aquifer_class": "Alluvium",
+                    "principle_aq_alluvium_percent": 100,
+                    "principle_aq_banded gneissic complex_percent": 0
+                  },
+                  {
+                    "uid": "12_208413",
+                    "area_in_ha": 864.04,
+                    "aquifer_class": "Alluvium",
+                    "principle_aq_alluvium_percent": 100,
+                    "principle_aq_banded gneissic complex_percent": 0
+                  }
+                ],
+                "Soge_vector": [
+                  "..............."
+                ]
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request - 'state', 'district', and 'tehsil' are required. OR State/District/Tehsil must contain only letters, spaces, and underscores"
+          },
+          "401": {
+            "description": "Unauthorized - Invalid or missing API key"
+          },
+          "404": {
+            "description": "Not Found - Data not found for this state, district, tehsil."
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "tags": [
+          "Dataset APIs"
+        ]
+      },
+      "parameters": []
+    },
+    "/get_village_geometries/": {
+      "get": {
+        "operationId": "get_village_geometries",
+        "summary": "Get Village Geometry",
+        "description": "\nRetrieve village geometry/polygon data for a given state, district, tehsil, and village ID.\n\n**Response format:**\nReturns a GeoJSON geometry object containing the polygon coordinates of the village boundary.\n\n**Example response:**\n```json\n{\n    \"type\": \"MultiPolygon\",\n    \"coordinates\": [\n        [\n            [\n                [88.27983, 21.944884],\n                [88.280062, 21.945069],\n                [88.280332, 21.946053],\n                [88.280332, 21.946058]\n            ]\n        ]\n    ]\n}\n```\n\n**Note:** This API returns only the raw geometry object without any wrapper.\nThe coordinates follow the [GeoJSON format](https://geojson.org/) with longitude, latitude pairs.\n",
+        "parameters": [
+          {
+            "name": "state",
+            "in": "query",
+            "description": "Name of the state (e.g. 'Uttar Pradesh')",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "district",
+            "in": "query",
+            "description": "Name of the district (e.g. 'Jaunpur')",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "tehsil",
+            "in": "query",
+            "description": "Name of the tehsil (e.g. 'Badlapur')",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "village_id",
+            "in": "query",
+            "description": "Unique Village identifier (e.g. '8234647')",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "description": "API Key in format: <your-api-key>",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success - Returns village geometry/polygon data",
+            "examples": {
+              "application/json": {
+                "type": "MultiPolygon",
+                "coordinates": [
+                  [
+                    [
+                      [
+                        88.27983,
+                        21.944884
+                      ],
+                      [
+                        88.280062,
+                        21.945069
+                      ],
+                      [
+                        88.280332,
+                        21.946053
+                      ],
+                      [
+                        88.280332,
+                        21.946058
+                      ]
+                    ]
+                  ]
+                ]
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request - Missing required parameters or invalid format",
+            "examples": {
+              "application/json": {
+                "error": "'state', 'district', 'tehsil', and 'village_id' parameters are required."
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized - Invalid or missing API key",
+            "examples": {
+              "application/json": {
+                "error": "Authentication credentials were not provided."
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found - Village ID not found",
+            "examples": {
+              "application/json": {
+                "error": "No village found with ID: 334670"
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "examples": {
+              "application/json": {
+                "error": "Internal server error: Unexpected error occurred"
+              }
+            }
+          }
+        },
+        "tags": [
+          "Dataset APIs"
+        ]
+      },
+      "parameters": []
+    },
+    "/get_waterbodies_data_by_admin/": {
+      "get": {
+        "operationId": "get_waterbodies_by_admin_and_uid",
+        "summary": "Get Waterbodies by admin data",
+        "description": "\n Retrive all waterbodies of a tehsil. This api accept state, district and tehsil as parameter and return all waterbodies of that tehsil\n\n **Response dataset details:**\n ```\n\"12_100174_104\": {\n      \"Block/Tehsil Name\": null,\n      \"District Name\": null,\n      \"MWS_UID\": \"12_100174\",\n      \"State Name\": null,\n      \"UID\": \"12_100174_104\",\n      \"Village Name\": null,\n      \"any\": 1,\n      \"area_17-18\": 0.14,\n      \"area_18-19\": 0.04,\n      \"area_19-20\": 1.35,\n      \"area_20-21\": 0.74,\n      \"area_21-22\": 0.8500000000000001,\n      \"area_22-23\": 0.87,\n      \"area_23-24\": 0.05,\n      \"area_ored\": 1.35,\n      \"basin_name\": null,\n      \"category_sq_m\": \"5000 and above\",\n      \"cca_water_body\": null,\n      \"census_id\": \"NA\",\n      \"construcion_year\": null,\n      \"construction_cost\": null,\n      \"filled_up_storage_name\": null,\n      \"filled_up_storage_space_name\": null,\n      \"ipc_water_body\": null,\n      \"ismissing\": null,\n      \"k_17-18\": 10.37037037037037,\n      \"k_18-19\": 2.9629629629629632,\n      \"k_19-20\": 100,\n      \"k_20-21\": 54.81481481481482,\n      \"k_21-22\": 62.96296296296296,\n      \"k_22-23\": 64.44444444444444,\n      \"k_23-24\": 3.7037037037037033,\n      \"khasra_number\": null,\n      \"kr_17-18\": 0,\n      \"kr_18-19\": 0,\n      \"kr_19-20\": 100,\n      \"kr_20-21\": 54.81481481481482,\n      \"kr_21-22\": 62.96296296296296,\n      \"kr_22-23\": 64.44444444444444,\n      \"kr_23-24\": 0,\n      \"krz_17-18\": 0,\n      \"krz_18-19\": 0,\n      \"krz_19-20\": 88.14814814814815,\n      \"krz_20-21\": 0,\n      \"krz_21-22\": 0,\n      \"krz_22-23\": 0,\n      \"krz_23-24\": 0,\n      \"latitude_dec\": null,\n      \"longitude_dec\": null,\n      \"manmade_water_body_type_name\": null,\n      \"max_catchment_area\": 1.0800000429153442,\n      \"max_depth_water_body_fully_filled\": null,\n      \"max_stream_order\": 1,\n      \"nature_of_storage\": null,\n      \"no_people_benefited_by_water_body\": null,\n      \"no_town_cities_benefited\": null,\n      \"no_villages_benefited\": null,\n      \"on_drainage_line\": 0,\n      \"reason_water_body_in_use_name2\": null,\n      \"reason_water_body_in_use_name3\": null,\n      \"ref_reason_water_body_in_use_id1_name\": null,\n      \"ref_selection_id_dip_sip_exists_name\": null,\n      \"ref_selection_id_encroachment_assessed_name\": null,\n      \"ref_selection_id_water_body_encroached_name\": null,\n      \"ref_selection_id_wua_exists_name\": null,\n      \"ref_water_body_in_use_id_name\": null,\n      \"ref_water_body_type_id_name\": null,\n      \"ref_water_body_under_repair_renovation_restoration_id_name\": null,\n      \"renovation_cost\": null,\n      \"renovation_year\": null,\n      \"rural_or_urban\": null,\n      \"scheme_status_reason_name\": null,\n      \"scheme_under_revival_is_done\": null,\n      \"si_no_of_water_body_within_village_town\": null,\n      \"storage_capacity_water_body_original\": null,\n      \"storage_capacity_water_body_present\": null,\n      \"sub_basin_name\": null,\n      \"town_municipalty_name\": \"NA\",\n      \"unique_id\": null,\n      \"ward_name\": null,\n      \"water\": 1,\n      \"water_body_loc_name\": null,\n      \"water_body_name\": null,\n      \"water_body_nature_name\": null,\n      \"water_body_ownership_name\": null,\n      \"water_spread_area_of_water_body\": null,\n      \"zoi_properties\": {\n          \"NDVI_2017\": \"{\"2017-07-01\":0.19190639720996805,\"2017-07-17\":0.16652886957558635,\"2017-08-02\":0.2483316913498386,\"2017-08-18\":0.3722320179985561,\"2017-09-03\":0.29822200600204307,\"2017-09-19\":0.39108661196153505,\"2017-10-05\":0.316656238780016,\"2017-10-21\":0.25132678279364656,\"2017-11-06\":0.20419075953109206,\"2017-11-22\":0.22659211572700674,\"2017-12-08\":0.2516505775964893,\"2017-12-24\":0.24268465677806814,\"2018-01-09\":0.23547389158421378,\"2018-01-25\":0.23145047351543818,\"2018-02-10\":0.19674321870102557,\"2018-02-26\":0.18086985378874304,\"2018-03-14\":0.16179061179743245,\"2018-03-30\":0.15638091797431722,\"2018-04-15\":0.15324917767834612,\"2018-05-01\":0.12885912695513788,\"2018-05-17\":0.13712820172332313,\"2018-06-02\":0.1361287345101296,\"2018-06-18\":0.1438606404364699}\",\n          \"UID\": \"12_100174_104\",\n          \"cropping_intensity_2017\": 0.8758494736277884,\n          \"cropping_intensity_2018\": 0.8773347888508941,\n          \"cropping_intensity_2019\": 1.011232397614076,\n          \"cropping_intensity_2020\": 1.0429794684965148,\n          \"cropping_intensity_2021\": 1.112742160761758,\n          \"cropping_intensity_2022\": 0.8245171687346268,\n          \"cropping_intensity_2023\": 0.8483210573848462,\n          \"doubly_cropped_area_2017\": 10.403982027665677,\n          \"doubly_cropped_area_2018\": 7.947182297465004,\n          \"doubly_cropped_area_2019\": 19.707443013700598,\n          \"doubly_cropped_area_2020\": 20.58962198562024,\n          \"doubly_cropped_area_2021\": 26.69617364654841,\n          \"doubly_cropped_area_2022\": 12.1965348541559,\n          \"doubly_cropped_area_2023\": 11.761747966473152,\n          \"single_cropped_area_2017\": 37.17978193029964,\n          \"single_cropped_area_2018\": 42.09132301590263,\n          \"single_cropped_area_2019\": 26.140299945511163,\n          \"single_cropped_area_2020\": 25.735496736665613,\n          \"single_cropped_area_2021\": 18.386056550837495,\n          \"single_cropped_area_2022\": 29.986002971723963,\n          \"single_cropped_area_2023\": 31.653712961159496,\n          \"single_kharif_cropped_area_2017\": 37.15275046515072,\n          \"single_kharif_cropped_area_2018\": 41.81980713357961,\n          \"single_kharif_cropped_area_2019\": 26.10425812345916,\n          \"single_kharif_cropped_area_2020\": 25.672423312898523,\n          \"single_kharif_cropped_area_2021\": 18.26892122216318,\n          \"single_kharif_cropped_area_2022\": 29.751729377058435,\n          \"single_kharif_cropped_area_2023\": 31.131105119667797,\n          \"single_non_kharif_cropped_area_2017\": 0.027031465148925782,\n          \"single_non_kharif_cropped_area_2018\": 0.27151588232302204,\n          \"single_non_kharif_cropped_area_2019\": 0.03604182205200195,\n          \"single_non_kharif_cropped_area_2020\": 0.06307342376708985,\n          \"single_non_kharif_cropped_area_2021\": 0.1171353286743164,\n          \"single_non_kharif_cropped_area_2022\": 0.23427359466552736,\n          \"single_non_kharif_cropped_area_2023\": 0.5226078414916993,\n          \"sum\": 664116.083092484,\n          \"total_cropable_area_ever_hydroyear_2017_2023\": 66.41160830924841,\n          \"triply_cropped_area_2017\": 0.05960873159969555,\n          \"triply_cropped_area_2018\": 0.09317558080336627,\n          \"triply_cropped_area_2019\": 0.5341279756852693,\n          \"triply_cropped_area_2020\": 0.783734409490847,\n          \"triply_cropped_area_2021\": 0.7068642285874311,\n          \"triply_cropped_area_2022\": 0.12614619140625,\n          \"triply_cropped_area_2023\": 0.3870522964746812,\n          \"zoi\": 547,\n          \"zoi_area\": 94\n      }\n  }\n ```\n",
+        "parameters": [
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "description": "API Key in format: <your-api-key>",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "description": "Name of the state (e.g. 'Uttar Pradesh')",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "district",
+            "in": "query",
+            "description": "Name of the district (e.g. 'Jaunpur')",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "tehsil",
+            "in": "query",
+            "description": "Name of the tehsil (e.g. 'Badlapur')",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success - It will return JSON data having admin details.",
+            "examples": {
+              "application/json": {
+                "12_100174_104": {
+                  "Block/Tehsil Name": null,
+                  "District Name": null,
+                  "MWS_UID": "12_100174",
+                  "State Name": null,
+                  "UID": "12_100174_104",
+                  "Village Name": null,
+                  "any": 1,
+                  "area_17-18": 0.14,
+                  "area_18-19": 0.04,
+                  "area_19-20": 1.35,
+                  "area_20-21": 0.74,
+                  "area_21-22": 0.8500000000000001,
+                  "area_22-23": 0.87,
+                  "area_23-24": 0.05,
+                  "area_ored": 1.35,
+                  "basin_name": null,
+                  "category_sq_m": "5000 and above",
+                  "cca_water_body": null,
+                  "census_id": "NA",
+                  "construcion_year": null,
+                  "construction_cost": null,
+                  "filled_up_storage_name": null,
+                  "filled_up_storage_space_name": null,
+                  "ipc_water_body": null,
+                  "ismissing": null,
+                  "k_17-18": 10.37037037037037,
+                  "k_18-19": 2.9629629629629632,
+                  "k_19-20": 100,
+                  "k_20-21": 54.81481481481482,
+                  "k_21-22": 62.96296296296296,
+                  "k_22-23": 64.44444444444444,
+                  "k_23-24": 3.7037037037037033,
+                  "khasra_number": null,
+                  "kr_17-18": 0,
+                  "kr_18-19": 0,
+                  "kr_19-20": 100,
+                  "kr_20-21": 54.81481481481482,
+                  "kr_21-22": 62.96296296296296,
+                  "kr_22-23": 64.44444444444444,
+                  "kr_23-24": 0,
+                  "krz_17-18": 0,
+                  "krz_18-19": 0,
+                  "krz_19-20": 88.14814814814815,
+                  "krz_20-21": 0,
+                  "krz_21-22": 0,
+                  "krz_22-23": 0,
+                  "krz_23-24": 0,
+                  "latitude_dec": null,
+                  "longitude_dec": null,
+                  "manmade_water_body_type_name": null,
+                  "max_catchment_area": 1.0800000429153442,
+                  "max_depth_water_body_fully_filled": null,
+                  "max_stream_order": 1,
+                  "nature_of_storage": null,
+                  "no_people_benefited_by_water_body": null,
+                  "no_town_cities_benefited": null,
+                  "no_villages_benefited": null,
+                  "on_drainage_line": 0,
+                  "reason_water_body_in_use_name2": null,
+                  "reason_water_body_in_use_name3": null,
+                  "ref_reason_water_body_in_use_id1_name": null,
+                  "ref_selection_id_dip_sip_exists_name": null,
+                  "ref_selection_id_encroachment_assessed_name": null,
+                  "ref_selection_id_water_body_encroached_name": null,
+                  "ref_selection_id_wua_exists_name": null,
+                  "ref_water_body_in_use_id_name": null,
+                  "ref_water_body_type_id_name": null,
+                  "ref_water_body_under_repair_renovation_restoration_id_name": null,
+                  "renovation_cost": null,
+                  "renovation_year": null,
+                  "rural_or_urban": null,
+                  "scheme_status_reason_name": null,
+                  "scheme_under_revival_is_done": null,
+                  "si_no_of_water_body_within_village_town": null,
+                  "storage_capacity_water_body_original": null,
+                  "storage_capacity_water_body_present": null,
+                  "sub_basin_name": null,
+                  "town_municipalty_name": "NA",
+                  "unique_id": null,
+                  "ward_name": null,
+                  "water": 1,
+                  "water_body_loc_name": null,
+                  "water_body_name": null,
+                  "water_body_nature_name": null,
+                  "water_body_ownership_name": null,
+                  "water_spread_area_of_water_body": null,
+                  "zoi_properties": {
+                    "NDVI_2017": "{\"2017-07-01\":0.19190639720996805,\"2017-07-17\":0.16652886957558635,\"2017-08-02\":0.2483316913498386,\"2017-08-18\":0.3722320179985561,\"2017-09-03\":0.29822200600204307,\"2017-09-19\":0.39108661196153505,\"2017-10-05\":0.316656238780016,\"2017-10-21\":0.25132678279364656,\"2017-11-06\":0.20419075953109206,\"2017-11-22\":0.22659211572700674,\"2017-12-08\":0.2516505775964893,\"2017-12-24\":0.24268465677806814,\"2018-01-09\":0.23547389158421378,\"2018-01-25\":0.23145047351543818,\"2018-02-10\":0.19674321870102557,\"2018-02-26\":0.18086985378874304,\"2018-03-14\":0.16179061179743245,\"2018-03-30\":0.15638091797431722,\"2018-04-15\":0.15324917767834612,\"2018-05-01\":0.12885912695513788,\"2018-05-17\":0.13712820172332313,\"2018-06-02\":0.1361287345101296,\"2018-06-18\":0.1438606404364699}",
+                    "UID": "12_100174_104",
+                    "cropping_intensity_2017": 0.8758494736277884,
+                    "cropping_intensity_2018": 0.8773347888508941,
+                    "cropping_intensity_2019": 1.011232397614076,
+                    "cropping_intensity_2020": 1.0429794684965148,
+                    "cropping_intensity_2021": 1.112742160761758,
+                    "cropping_intensity_2022": 0.8245171687346268,
+                    "cropping_intensity_2023": 0.8483210573848462,
+                    "doubly_cropped_area_2017": 10.403982027665677,
+                    "doubly_cropped_area_2018": 7.947182297465004,
+                    "doubly_cropped_area_2019": 19.707443013700598,
+                    "doubly_cropped_area_2020": 20.58962198562024,
+                    "doubly_cropped_area_2021": 26.69617364654841,
+                    "doubly_cropped_area_2022": 12.1965348541559,
+                    "doubly_cropped_area_2023": 11.761747966473152,
+                    "single_cropped_area_2017": 37.17978193029964,
+                    "single_cropped_area_2018": 42.09132301590263,
+                    "single_cropped_area_2019": 26.140299945511163,
+                    "single_cropped_area_2020": 25.735496736665613,
+                    "single_cropped_area_2021": 18.386056550837495,
+                    "single_cropped_area_2022": 29.986002971723963,
+                    "single_cropped_area_2023": 31.653712961159496,
+                    "single_kharif_cropped_area_2017": 37.15275046515072,
+                    "single_kharif_cropped_area_2018": 41.81980713357961,
+                    "single_kharif_cropped_area_2019": 26.10425812345916,
+                    "single_kharif_cropped_area_2020": 25.672423312898523,
+                    "single_kharif_cropped_area_2021": 18.26892122216318,
+                    "single_kharif_cropped_area_2022": 29.751729377058435,
+                    "single_kharif_cropped_area_2023": 31.131105119667797,
+                    "single_non_kharif_cropped_area_2017": 0.027031465148925782,
+                    "single_non_kharif_cropped_area_2018": 0.27151588232302204,
+                    "single_non_kharif_cropped_area_2019": 0.03604182205200195,
+                    "single_non_kharif_cropped_area_2020": 0.06307342376708985,
+                    "single_non_kharif_cropped_area_2021": 0.1171353286743164,
+                    "single_non_kharif_cropped_area_2022": 0.23427359466552736,
+                    "single_non_kharif_cropped_area_2023": 0.5226078414916993,
+                    "sum": 664116.083092484,
+                    "total_cropable_area_ever_hydroyear_2017_2023": 66.41160830924841,
+                    "triply_cropped_area_2017": 0.05960873159969555,
+                    "triply_cropped_area_2018": 0.09317558080336627,
+                    "triply_cropped_area_2019": 0.5341279756852693,
+                    "triply_cropped_area_2020": 0.783734409490847,
+                    "triply_cropped_area_2021": 0.7068642285874311,
+                    "triply_cropped_area_2022": 0.12614619140625,
+                    "triply_cropped_area_2023": 0.3870522964746812,
+                    "zoi": 547,
+                    "zoi_area": 94
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request - Both 'latitude' and 'longitude' parameters are required. OR Latitude and longitude must be valid numbers(float)."
+          },
+          "401": {
+            "description": "Unauthorized - Invalid or missing API key"
+          },
+          "404": {
+            "description": "Not Found - Latitude and longitude is not in SOI boundary."
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "tags": [
+          "Waterbodies API"
+        ]
+      },
+      "parameters": []
+    },
+    "/get_waterbody_data/": {
+      "get": {
+        "operationId": "get_waterbodies_by_uid",
+        "summary": "Get Waterbodies by uid",
+        "description": "\n Retrive  waterbody data by its unique identifier uid. This api returns all data related to that waterbody\n\n **Response dataset details:**\n ```\n\"12_100174_104\": {\n      \"Block/Tehsil Name\": null,\n      \"District Name\": null,\n      \"MWS_UID\": \"12_100174\",\n      \"State Name\": null,\n      \"UID\": \"12_100174_104\",\n      \"Village Name\": null,\n      \"any\": 1,\n      \"area_17-18\": 0.14,\n      \"area_18-19\": 0.04,\n      \"area_19-20\": 1.35,\n      \"area_20-21\": 0.74,\n      \"area_21-22\": 0.8500000000000001,\n      \"area_22-23\": 0.87,\n      \"area_23-24\": 0.05,\n      \"area_ored\": 1.35,\n      \"basin_name\": null,\n      \"category_sq_m\": \"5000 and above\",\n      \"cca_water_body\": null,\n      \"census_id\": \"NA\",\n      \"construcion_year\": null,\n      \"construction_cost\": null,\n      \"filled_up_storage_name\": null,\n      \"filled_up_storage_space_name\": null,\n      \"ipc_water_body\": null,\n      \"ismissing\": null,\n      \"k_17-18\": 10.37037037037037,\n      \"k_18-19\": 2.9629629629629632,\n      \"k_19-20\": 100,\n      \"k_20-21\": 54.81481481481482,\n      \"k_21-22\": 62.96296296296296,\n      \"k_22-23\": 64.44444444444444,\n      \"k_23-24\": 3.7037037037037033,\n      \"khasra_number\": null,\n      \"kr_17-18\": 0,\n      \"kr_18-19\": 0,\n      \"kr_19-20\": 100,\n      \"kr_20-21\": 54.81481481481482,\n      \"kr_21-22\": 62.96296296296296,\n      \"kr_22-23\": 64.44444444444444,\n      \"kr_23-24\": 0,\n      \"krz_17-18\": 0,\n      \"krz_18-19\": 0,\n      \"krz_19-20\": 88.14814814814815,\n      \"krz_20-21\": 0,\n      \"krz_21-22\": 0,\n      \"krz_22-23\": 0,\n      \"krz_23-24\": 0,\n      \"latitude_dec\": null,\n      \"longitude_dec\": null,\n      \"manmade_water_body_type_name\": null,\n      \"max_catchment_area\": 1.0800000429153442,\n      \"max_depth_water_body_fully_filled\": null,\n      \"max_stream_order\": 1,\n      \"nature_of_storage\": null,\n      \"no_people_benefited_by_water_body\": null,\n      \"no_town_cities_benefited\": null,\n      \"no_villages_benefited\": null,\n      \"on_drainage_line\": 0,\n      \"reason_water_body_in_use_name2\": null,\n      \"reason_water_body_in_use_name3\": null,\n      \"ref_reason_water_body_in_use_id1_name\": null,\n      \"ref_selection_id_dip_sip_exists_name\": null,\n      \"ref_selection_id_encroachment_assessed_name\": null,\n      \"ref_selection_id_water_body_encroached_name\": null,\n      \"ref_selection_id_wua_exists_name\": null,\n      \"ref_water_body_in_use_id_name\": null,\n      \"ref_water_body_type_id_name\": null,\n      \"ref_water_body_under_repair_renovation_restoration_id_name\": null,\n      \"renovation_cost\": null,\n      \"renovation_year\": null,\n      \"rural_or_urban\": null,\n      \"scheme_status_reason_name\": null,\n      \"scheme_under_revival_is_done\": null,\n      \"si_no_of_water_body_within_village_town\": null,\n      \"storage_capacity_water_body_original\": null,\n      \"storage_capacity_water_body_present\": null,\n      \"sub_basin_name\": null,\n      \"town_municipalty_name\": \"NA\",\n      \"unique_id\": null,\n      \"ward_name\": null,\n      \"water\": 1,\n      \"water_body_loc_name\": null,\n      \"water_body_name\": null,\n      \"water_body_nature_name\": null,\n      \"water_body_ownership_name\": null,\n      \"water_spread_area_of_water_body\": null,\n      \"zoi_properties\": {\n          \"NDVI_2017\": \"{\"2017-07-01\":0.19190639720996805,\"2017-07-17\":0.16652886957558635,\"2017-08-02\":0.2483316913498386,\"2017-08-18\":0.3722320179985561,\"2017-09-03\":0.29822200600204307,\"2017-09-19\":0.39108661196153505,\"2017-10-05\":0.316656238780016,\"2017-10-21\":0.25132678279364656,\"2017-11-06\":0.20419075953109206,\"2017-11-22\":0.22659211572700674,\"2017-12-08\":0.2516505775964893,\"2017-12-24\":0.24268465677806814,\"2018-01-09\":0.23547389158421378,\"2018-01-25\":0.23145047351543818,\"2018-02-10\":0.19674321870102557,\"2018-02-26\":0.18086985378874304,\"2018-03-14\":0.16179061179743245,\"2018-03-30\":0.15638091797431722,\"2018-04-15\":0.15324917767834612,\"2018-05-01\":0.12885912695513788,\"2018-05-17\":0.13712820172332313,\"2018-06-02\":0.1361287345101296,\"2018-06-18\":0.1438606404364699}\",\n          \"UID\": \"12_100174_104\",\n          \"cropping_intensity_2017\": 0.8758494736277884,\n          \"cropping_intensity_2018\": 0.8773347888508941,\n          \"cropping_intensity_2019\": 1.011232397614076,\n          \"cropping_intensity_2020\": 1.0429794684965148,\n          \"cropping_intensity_2021\": 1.112742160761758,\n          \"cropping_intensity_2022\": 0.8245171687346268,\n          \"cropping_intensity_2023\": 0.8483210573848462,\n          \"doubly_cropped_area_2017\": 10.403982027665677,\n          \"doubly_cropped_area_2018\": 7.947182297465004,\n          \"doubly_cropped_area_2019\": 19.707443013700598,\n          \"doubly_cropped_area_2020\": 20.58962198562024,\n          \"doubly_cropped_area_2021\": 26.69617364654841,\n          \"doubly_cropped_area_2022\": 12.1965348541559,\n          \"doubly_cropped_area_2023\": 11.761747966473152,\n          \"single_cropped_area_2017\": 37.17978193029964,\n          \"single_cropped_area_2018\": 42.09132301590263,\n          \"single_cropped_area_2019\": 26.140299945511163,\n          \"single_cropped_area_2020\": 25.735496736665613,\n          \"single_cropped_area_2021\": 18.386056550837495,\n          \"single_cropped_area_2022\": 29.986002971723963,\n          \"single_cropped_area_2023\": 31.653712961159496,\n          \"single_kharif_cropped_area_2017\": 37.15275046515072,\n          \"single_kharif_cropped_area_2018\": 41.81980713357961,\n          \"single_kharif_cropped_area_2019\": 26.10425812345916,\n          \"single_kharif_cropped_area_2020\": 25.672423312898523,\n          \"single_kharif_cropped_area_2021\": 18.26892122216318,\n          \"single_kharif_cropped_area_2022\": 29.751729377058435,\n          \"single_kharif_cropped_area_2023\": 31.131105119667797,\n          \"single_non_kharif_cropped_area_2017\": 0.027031465148925782,\n          \"single_non_kharif_cropped_area_2018\": 0.27151588232302204,\n          \"single_non_kharif_cropped_area_2019\": 0.03604182205200195,\n          \"single_non_kharif_cropped_area_2020\": 0.06307342376708985,\n          \"single_non_kharif_cropped_area_2021\": 0.1171353286743164,\n          \"single_non_kharif_cropped_area_2022\": 0.23427359466552736,\n          \"single_non_kharif_cropped_area_2023\": 0.5226078414916993,\n          \"sum\": 664116.083092484,\n          \"total_cropable_area_ever_hydroyear_2017_2023\": 66.41160830924841,\n          \"triply_cropped_area_2017\": 0.05960873159969555,\n          \"triply_cropped_area_2018\": 0.09317558080336627,\n          \"triply_cropped_area_2019\": 0.5341279756852693,\n          \"triply_cropped_area_2020\": 0.783734409490847,\n          \"triply_cropped_area_2021\": 0.7068642285874311,\n          \"triply_cropped_area_2022\": 0.12614619140625,\n          \"triply_cropped_area_2023\": 0.3870522964746812,\n          \"zoi\": 547,\n          \"zoi_area\": 94\n      }\n  }\n ```\n",
+        "parameters": [
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "description": "API Key in format: <your-api-key>",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "description": "Name of the state (e.g. 'Uttar Pradesh')",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "district",
+            "in": "query",
+            "description": "Name of the district (e.g. 'Jaunpur')",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "tehsil",
+            "in": "query",
+            "description": "Name of the tehsil (e.g. 'Badlapur')",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "uid",
+            "in": "query",
+            "description": "Unique waterbodies identifier (e.g. '12_100174_104')",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success - It will return JSON data having admin details.",
+            "examples": {
+              "application/json": {
+                "12_100174_104": {
+                  "Block/Tehsil Name": null,
+                  "District Name": null,
+                  "MWS_UID": "12_100174",
+                  "State Name": null,
+                  "UID": "12_100174_104",
+                  "Village Name": null,
+                  "any": 1,
+                  "area_17-18": 0.14,
+                  "area_18-19": 0.04,
+                  "area_19-20": 1.35,
+                  "area_20-21": 0.74,
+                  "area_21-22": 0.8500000000000001,
+                  "area_22-23": 0.87,
+                  "area_23-24": 0.05,
+                  "area_ored": 1.35,
+                  "basin_name": null,
+                  "category_sq_m": "5000 and above",
+                  "cca_water_body": null,
+                  "census_id": "NA",
+                  "construcion_year": null,
+                  "construction_cost": null,
+                  "filled_up_storage_name": null,
+                  "filled_up_storage_space_name": null,
+                  "ipc_water_body": null,
+                  "ismissing": null,
+                  "k_17-18": 10.37037037037037,
+                  "k_18-19": 2.9629629629629632,
+                  "k_19-20": 100,
+                  "k_20-21": 54.81481481481482,
+                  "k_21-22": 62.96296296296296,
+                  "k_22-23": 64.44444444444444,
+                  "k_23-24": 3.7037037037037033,
+                  "khasra_number": null,
+                  "kr_17-18": 0,
+                  "kr_18-19": 0,
+                  "kr_19-20": 100,
+                  "kr_20-21": 54.81481481481482,
+                  "kr_21-22": 62.96296296296296,
+                  "kr_22-23": 64.44444444444444,
+                  "kr_23-24": 0,
+                  "krz_17-18": 0,
+                  "krz_18-19": 0,
+                  "krz_19-20": 88.14814814814815,
+                  "krz_20-21": 0,
+                  "krz_21-22": 0,
+                  "krz_22-23": 0,
+                  "krz_23-24": 0,
+                  "latitude_dec": null,
+                  "longitude_dec": null,
+                  "manmade_water_body_type_name": null,
+                  "max_catchment_area": 1.0800000429153442,
+                  "max_depth_water_body_fully_filled": null,
+                  "max_stream_order": 1,
+                  "nature_of_storage": null,
+                  "no_people_benefited_by_water_body": null,
+                  "no_town_cities_benefited": null,
+                  "no_villages_benefited": null,
+                  "on_drainage_line": 0,
+                  "reason_water_body_in_use_name2": null,
+                  "reason_water_body_in_use_name3": null,
+                  "ref_reason_water_body_in_use_id1_name": null,
+                  "ref_selection_id_dip_sip_exists_name": null,
+                  "ref_selection_id_encroachment_assessed_name": null,
+                  "ref_selection_id_water_body_encroached_name": null,
+                  "ref_selection_id_wua_exists_name": null,
+                  "ref_water_body_in_use_id_name": null,
+                  "ref_water_body_type_id_name": null,
+                  "ref_water_body_under_repair_renovation_restoration_id_name": null,
+                  "renovation_cost": null,
+                  "renovation_year": null,
+                  "rural_or_urban": null,
+                  "scheme_status_reason_name": null,
+                  "scheme_under_revival_is_done": null,
+                  "si_no_of_water_body_within_village_town": null,
+                  "storage_capacity_water_body_original": null,
+                  "storage_capacity_water_body_present": null,
+                  "sub_basin_name": null,
+                  "town_municipalty_name": "NA",
+                  "unique_id": null,
+                  "ward_name": null,
+                  "water": 1,
+                  "water_body_loc_name": null,
+                  "water_body_name": null,
+                  "water_body_nature_name": null,
+                  "water_body_ownership_name": null,
+                  "water_spread_area_of_water_body": null,
+                  "zoi_properties": {
+                    "NDVI_2017": "{\"2017-07-01\":0.19190639720996805,\"2017-07-17\":0.16652886957558635,\"2017-08-02\":0.2483316913498386,\"2017-08-18\":0.3722320179985561,\"2017-09-03\":0.29822200600204307,\"2017-09-19\":0.39108661196153505,\"2017-10-05\":0.316656238780016,\"2017-10-21\":0.25132678279364656,\"2017-11-06\":0.20419075953109206,\"2017-11-22\":0.22659211572700674,\"2017-12-08\":0.2516505775964893,\"2017-12-24\":0.24268465677806814,\"2018-01-09\":0.23547389158421378,\"2018-01-25\":0.23145047351543818,\"2018-02-10\":0.19674321870102557,\"2018-02-26\":0.18086985378874304,\"2018-03-14\":0.16179061179743245,\"2018-03-30\":0.15638091797431722,\"2018-04-15\":0.15324917767834612,\"2018-05-01\":0.12885912695513788,\"2018-05-17\":0.13712820172332313,\"2018-06-02\":0.1361287345101296,\"2018-06-18\":0.1438606404364699}",
+                    "UID": "12_100174_104",
+                    "cropping_intensity_2017": 0.8758494736277884,
+                    "cropping_intensity_2018": 0.8773347888508941,
+                    "cropping_intensity_2019": 1.011232397614076,
+                    "cropping_intensity_2020": 1.0429794684965148,
+                    "cropping_intensity_2021": 1.112742160761758,
+                    "cropping_intensity_2022": 0.8245171687346268,
+                    "cropping_intensity_2023": 0.8483210573848462,
+                    "doubly_cropped_area_2017": 10.403982027665677,
+                    "doubly_cropped_area_2018": 7.947182297465004,
+                    "doubly_cropped_area_2019": 19.707443013700598,
+                    "doubly_cropped_area_2020": 20.58962198562024,
+                    "doubly_cropped_area_2021": 26.69617364654841,
+                    "doubly_cropped_area_2022": 12.1965348541559,
+                    "doubly_cropped_area_2023": 11.761747966473152,
+                    "single_cropped_area_2017": 37.17978193029964,
+                    "single_cropped_area_2018": 42.09132301590263,
+                    "single_cropped_area_2019": 26.140299945511163,
+                    "single_cropped_area_2020": 25.735496736665613,
+                    "single_cropped_area_2021": 18.386056550837495,
+                    "single_cropped_area_2022": 29.986002971723963,
+                    "single_cropped_area_2023": 31.653712961159496,
+                    "single_kharif_cropped_area_2017": 37.15275046515072,
+                    "single_kharif_cropped_area_2018": 41.81980713357961,
+                    "single_kharif_cropped_area_2019": 26.10425812345916,
+                    "single_kharif_cropped_area_2020": 25.672423312898523,
+                    "single_kharif_cropped_area_2021": 18.26892122216318,
+                    "single_kharif_cropped_area_2022": 29.751729377058435,
+                    "single_kharif_cropped_area_2023": 31.131105119667797,
+                    "single_non_kharif_cropped_area_2017": 0.027031465148925782,
+                    "single_non_kharif_cropped_area_2018": 0.27151588232302204,
+                    "single_non_kharif_cropped_area_2019": 0.03604182205200195,
+                    "single_non_kharif_cropped_area_2020": 0.06307342376708985,
+                    "single_non_kharif_cropped_area_2021": 0.1171353286743164,
+                    "single_non_kharif_cropped_area_2022": 0.23427359466552736,
+                    "single_non_kharif_cropped_area_2023": 0.5226078414916993,
+                    "sum": 664116.083092484,
+                    "total_cropable_area_ever_hydroyear_2017_2023": 66.41160830924841,
+                    "triply_cropped_area_2017": 0.05960873159969555,
+                    "triply_cropped_area_2018": 0.09317558080336627,
+                    "triply_cropped_area_2019": 0.5341279756852693,
+                    "triply_cropped_area_2020": 0.783734409490847,
+                    "triply_cropped_area_2021": 0.7068642285874311,
+                    "triply_cropped_area_2022": 0.12614619140625,
+                    "triply_cropped_area_2023": 0.3870522964746812,
+                    "zoi": 547,
+                    "zoi_area": 94
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request - Both 'latitude' and 'longitude' parameters are required. OR Latitude and longitude must be valid numbers(float)."
+          },
+          "401": {
+            "description": "Unauthorized - Invalid or missing API key"
+          },
+          "404": {
+            "description": "Not Found - Latitude and longitude is not in SOI boundary."
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        },
+        "tags": [
+          "Waterbodies API"
+        ]
+      },
+      "parameters": []
+    }
+  },
+  "definitions": {
+    "TokenRefresh": {
+      "required": [
+        "refresh"
+      ],
+      "type": "object",
+      "properties": {
+        "refresh": {
+          "title": "Refresh",
+          "type": "string",
+          "minLength": 1
+        },
+        "access": {
+          "title": "Access",
+          "type": "string",
+          "readOnly": true,
+          "minLength": 1
+        }
+      }
+    }
+  }
+}

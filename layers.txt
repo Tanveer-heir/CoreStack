@@ -1,0 +1,541 @@
+
+======================================================================
+📂 DATASET: Ccd Raster
+======================================================================
+Year: 2017
+Layer Name: ccd_raster_dharwad_navalgund_2017
+Type: raster
+--------------------------------------------------
+Year: 2018
+Layer Name: ccd_raster_dharwad_navalgund_2018
+Type: raster
+--------------------------------------------------
+Year: 2020
+Layer Name: ccd_raster_dharwad_navalgund_2020
+Type: raster
+--------------------------------------------------
+Year: 2021
+Layer Name: ccd_raster_dharwad_navalgund_2021
+Type: raster
+--------------------------------------------------
+Year: 2022
+Layer Name: ccd_raster_dharwad_navalgund_2022
+Type: raster
+--------------------------------------------------
+Year: 2023
+Layer Name: ccd_raster_dharwad_navalgund_2023
+Type: raster
+--------------------------------------------------
+Year: 2019
+Layer Name: ccd_raster_dharwad_navalgund_2019
+Type: raster
+--------------------------------------------------
+
+Total layers in Ccd Raster: 7
+
+======================================================================
+📂 DATASET: Cropping Intensity
+======================================================================
+Year: None
+Layer Name: dharwad_navalgund_intensity
+Type: vector
+--------------------------------------------------
+
+Total layers in Cropping Intensity: 1
+
+======================================================================
+📂 DATASET: NREGA Assets
+======================================================================
+Year: None
+Layer Name: dharwad_navalgund
+Type: vector
+--------------------------------------------------
+
+Total layers in NREGA Assets: 1
+
+======================================================================
+📂 DATASET: LULC_level_3
+======================================================================
+Year: None
+Layer Name: LULC_24_25_dharwad_navalgund_level_3
+Type: raster
+--------------------------------------------------
+Year: None
+Layer Name: LULC_18_19_dharwad_navalgund_level_3
+Type: raster
+--------------------------------------------------
+Year: None
+Layer Name: LULC_23_24_dharwad_navalgund_level_3
+Type: raster
+--------------------------------------------------
+Year: None
+Layer Name: LULC_21_22_dharwad_navalgund_level_3
+Type: raster
+--------------------------------------------------
+Year: None
+Layer Name: LULC_22_23_dharwad_navalgund_level_3
+Type: raster
+--------------------------------------------------
+Year: None
+Layer Name: LULC_17_18_dharwad_navalgund_level_3
+Type: raster
+--------------------------------------------------
+Year: None
+Layer Name: LULC_19_20_dharwad_navalgund_level_3
+Type: raster
+--------------------------------------------------
+Year: None
+Layer Name: LULC_20_21_dharwad_navalgund_level_3
+Type: raster
+--------------------------------------------------
+
+Total layers in LULC_level_3: 8
+
+======================================================================
+📂 DATASET: Drought Causality
+======================================================================
+Year: None
+Layer Name: dharwad_navalgund_drought_causality
+Type: vector
+--------------------------------------------------
+
+Total layers in Drought Causality: 1
+
+======================================================================
+📂 DATASET: Hydrology
+======================================================================
+Year: None
+Layer Name: deltaG_well_depth_dharwad_navalgund
+Type: vector
+--------------------------------------------------
+Year: None
+Layer Name: deltaG_fortnight_dharwad_navalgund
+Type: vector
+--------------------------------------------------
+Year: None
+Layer Name: deltaG_well_depth_dharwad_navalgund
+Type: vector
+--------------------------------------------------
+Year: None
+Layer Name: deltaG_fortnight_dharwad_navalgund
+Type: vector
+--------------------------------------------------
+
+Total layers in Hydrology: 4
+
+======================================================================
+📂 DATASET: Site Suitability
+======================================================================
+Year: None
+Layer Name: dharwad_navalgund_site_suitability_raster
+Type: raster
+--------------------------------------------------
+
+Total layers in Site Suitability: 1
+
+======================================================================
+📂 DATASET: Canopy Height Raster
+======================================================================
+Year: 2018
+Layer Name: ch_raster_dharwad_navalgund_2018
+Type: raster
+--------------------------------------------------
+Year: 2021
+Layer Name: ch_raster_dharwad_navalgund_2021
+Type: raster
+--------------------------------------------------
+Year: 2022
+Layer Name: ch_raster_dharwad_navalgund_2022
+Type: raster
+--------------------------------------------------
+Year: 2023
+Layer Name: ch_raster_dharwad_navalgund_2023
+Type: raster
+--------------------------------------------------
+Year: 2019
+Layer Name: ch_raster_dharwad_navalgund_2019
+Type: raster
+--------------------------------------------------
+Year: 2017
+Layer Name: ch_raster_dharwad_navalgund_2017
+Type: raster
+--------------------------------------------------
+Year: 2020
+Layer Name: ch_raster_dharwad_navalgund_2020
+Type: raster
+--------------------------------------------------
+
+Total layers in Canopy Height Raster: 7
+
+======================================================================
+📂 DATASET: Tree Overall Change Raster
+======================================================================
+Year: None
+Layer Name: overall_change_raster_dharwad_navalgund
+Type: raster
+--------------------------------------------------
+
+Total layers in Tree Overall Change Raster: 1
+
+======================================================================
+📂 DATASET: Catchment Area
+======================================================================
+Year: None
+Layer Name: catchment_area_dharwad_navalgund_raster
+Type: raster
+--------------------------------------------------
+
+Total layers in Catchment Area: 1
+
+======================================================================
+📂 DATASET: Surface Water Bodies
+======================================================================
+Year: None
+Layer Name: surface_waterbodies_dharwad_navalgund
+Type: vector
+--------------------------------------------------
+Year: None
+Layer Name: waterbodies_zoi_dharwad_navalgund
+Type: vector
+--------------------------------------------------
+
+Total layers in Surface Water Bodies: 2
+
+======================================================================
+📂 DATASET: Drainage
+======================================================================
+Year: None
+Layer Name: dharwad_navalgund
+Type: vector
+--------------------------------------------------
+
+Total layers in Drainage: 1
+
+======================================================================
+📂 DATASET: Change Detection Raster
+======================================================================
+Year: None
+Layer Name: change_dharwad_navalgund_Urbanization
+Type: raster
+--------------------------------------------------
+Year: None
+Layer Name: change_dharwad_navalgund_Degradation
+Type: raster
+--------------------------------------------------
+Year: None
+Layer Name: change_dharwad_navalgund_Deforestation
+Type: raster
+--------------------------------------------------
+Year: None
+Layer Name: change_dharwad_navalgund_Afforestation
+Type: raster
+--------------------------------------------------
+Year: None
+Layer Name: change_dharwad_navalgund_CropIntensity
+Type: raster
+--------------------------------------------------
+
+Total layers in Change Detection Raster: 5
+
+======================================================================
+📂 DATASET: Terrain Vector
+======================================================================
+Year: None
+Layer Name: dharwad_navalgund_cluster
+Type: vector
+--------------------------------------------------
+
+Total layers in Terrain Vector: 1
+
+======================================================================
+📂 DATASET: Terrain Raster
+======================================================================
+Year: None
+Layer Name: dharwad_navalgund_terrain_raster
+Type: raster
+--------------------------------------------------
+
+Total layers in Terrain Raster: 1
+
+======================================================================
+📂 DATASET: Stream Order
+======================================================================
+Year: None
+Layer Name: stream_order_dharwad_navalgund_vector
+Type: vector
+--------------------------------------------------
+Year: None
+Layer Name: stream_order_dharwad_navalgund_raster
+Type: vector
+--------------------------------------------------
+
+Total layers in Stream Order: 2
+
+======================================================================
+📂 DATASET: Restoration Vector
+======================================================================
+Year: None
+Layer Name: restoration_dharwad_navalgund_vector
+Type: vector
+--------------------------------------------------
+
+Total layers in Restoration Vector: 1
+
+======================================================================
+📂 DATASET: Distance to Drainage Line
+======================================================================
+Year: None
+Layer Name: distance_to_drainage_line_dharwad_navalgund_raster
+Type: raster
+--------------------------------------------------
+
+Total layers in Distance to Drainage Line: 1
+
+======================================================================
+📂 DATASET: Restoration Raster
+======================================================================
+Year: None
+Layer Name: restoration_dharwad_navalgund_raster
+Type: raster
+--------------------------------------------------
+
+Total layers in Restoration Raster: 1
+
+======================================================================
+📂 DATASET: SOGE
+======================================================================
+Year: None
+Layer Name: soge_vector_dharwad_navalgund
+Type: vector
+--------------------------------------------------
+
+Total layers in SOGE: 1
+
+======================================================================
+📂 DATASET: Crop GridXlulc
+======================================================================
+Year: None
+Layer Name: dharwad_navalgund_grid
+Type: vector
+--------------------------------------------------
+
+Total layers in Crop GridXlulc: 1
+
+======================================================================
+📂 DATASET: LULC
+======================================================================
+Year: None
+Layer Name: lulc_vector_dharwad_navalgund
+Type: vector
+--------------------------------------------------
+
+Total layers in LULC: 1
+
+======================================================================
+📂 DATASET: Drainage Density
+======================================================================
+Year: None
+Layer Name: drainage_density_dharwad_navalgund
+Type: raster
+--------------------------------------------------
+
+Total layers in Drainage Density: 1
+
+======================================================================
+📂 DATASET: Drought
+======================================================================
+Year: None
+Layer Name: dharwad_navalgund_drought
+Type: vector
+--------------------------------------------------
+Year: None
+Layer Name: dharwad_navalgund_drought
+Type: vector
+--------------------------------------------------
+
+Total layers in Drought: 2
+
+======================================================================
+📂 DATASET: Change Detection Vector
+======================================================================
+Year: None
+Layer Name: change_vector_dharwad_navalgund_Degradation
+Type: vector
+--------------------------------------------------
+Year: None
+Layer Name: change_vector_dharwad_navalgund_Deforestation
+Type: vector
+--------------------------------------------------
+Year: None
+Layer Name: change_vector_dharwad_navalgund_Afforestation
+Type: vector
+--------------------------------------------------
+Year: None
+Layer Name: change_vector_dharwad_navalgund_Urbanization
+Type: vector
+--------------------------------------------------
+Year: None
+Layer Name: change_vector_dharwad_navalgund_CropIntensity
+Type: vector
+--------------------------------------------------
+
+Total layers in Change Detection Vector: 5
+
+======================================================================
+📂 DATASET: Aquifer
+======================================================================
+Year: None
+Layer Name: aquifer_vector_dharwad_navalgund
+Type: vector
+--------------------------------------------------
+
+Total layers in Aquifer: 1
+
+======================================================================
+📂 DATASET: Admin Boundary
+======================================================================
+Year: None
+Layer Name: dharwad_navalgund
+Type: vector
+--------------------------------------------------
+
+Total layers in Admin Boundary: 1
+
+======================================================================
+📂 DATASET: LULC_level_2
+======================================================================
+Year: None
+Layer Name: LULC_18_19_dharwad_navalgund_level_2
+Type: raster
+--------------------------------------------------
+Year: None
+Layer Name: LULC_19_20_dharwad_navalgund_level_2
+Type: raster
+--------------------------------------------------
+Year: None
+Layer Name: LULC_17_18_dharwad_navalgund_level_2
+Type: raster
+--------------------------------------------------
+Year: None
+Layer Name: LULC_23_24_dharwad_navalgund_level_2
+Type: raster
+--------------------------------------------------
+Year: None
+Layer Name: LULC_20_21_dharwad_navalgund_level_2
+Type: raster
+--------------------------------------------------
+Year: None
+Layer Name: LULC_21_22_dharwad_navalgund_level_2
+Type: raster
+--------------------------------------------------
+Year: None
+Layer Name: LULC_24_25_dharwad_navalgund_level_2
+Type: raster
+--------------------------------------------------
+Year: None
+Layer Name: LULC_22_23_dharwad_navalgund_level_2
+Type: raster
+--------------------------------------------------
+
+Total layers in LULC_level_2: 8
+
+======================================================================
+📂 DATASET: LULC_level_1
+======================================================================
+Year: None
+Layer Name: LULC_20_21_dharwad_navalgund_level_1
+Type: raster
+--------------------------------------------------
+Year: None
+Layer Name: LULC_21_22_dharwad_navalgund_level_1
+Type: raster
+--------------------------------------------------
+Year: None
+Layer Name: LULC_22_23_dharwad_navalgund_level_1
+Type: raster
+--------------------------------------------------
+Year: None
+Layer Name: LULC_23_24_dharwad_navalgund_level_1
+Type: raster
+--------------------------------------------------
+Year: None
+Layer Name: LULC_17_18_dharwad_navalgund_level_1
+Type: raster
+--------------------------------------------------
+Year: None
+Layer Name: LULC_18_19_dharwad_navalgund_level_1
+Type: raster
+--------------------------------------------------
+Year: None
+Layer Name: LULC_19_20_dharwad_navalgund_level_1
+Type: raster
+--------------------------------------------------
+Year: None
+Layer Name: LULC_24_25_dharwad_navalgund_level_1
+Type: raster
+--------------------------------------------------
+
+Total layers in LULC_level_1: 8
+
+======================================================================
+📂 DATASET: Slope Percentage
+======================================================================
+Year: None
+Layer Name: dharwad_navalgund_slope_percentage_raster
+Type: raster
+--------------------------------------------------
+
+Total layers in Slope Percentage: 1
+
+======================================================================
+📂 DATASET: NDVI Timeseries
+======================================================================
+Year: None
+Layer Name: ndvi_timeseries_dharwad_navalgund_crop
+Type: vector
+--------------------------------------------------
+
+Total layers in NDVI Timeseries: 1
+
+======================================================================
+📂 DATASET: Mws Connectivity
+======================================================================
+Year: None
+Layer Name: dharwad_navalgund_mws_connectivity
+Type: vector
+--------------------------------------------------
+
+Total layers in Mws Connectivity: 1
+
+======================================================================
+📂 DATASET: CLART
+======================================================================
+Year: None
+Layer Name: dharwad_navalgund_clart
+Type: raster
+--------------------------------------------------
+
+Total layers in CLART: 1
+
+======================================================================
+📂 DATASET: Terrain LULC
+======================================================================
+Year: None
+Layer Name: dharwad_navalgund_Type: vector
+--------------------------------------------------
+
+Total layers in Terrain LULC: 1
+
+======================================================================
+📂 DATASET: Natural Depression
+======================================================================
+Year: None
+Layer Name: natural_depression_dharwad_navalgund_raster
+Type: raster
+--------------------------------------------------
+
+Total layers in Natural Depression: 1
+
+======================================================================
+🔥 TOTAL LAYERS RETURNED: 82
+======================================================================
