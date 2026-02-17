@@ -928,6 +928,60 @@ IMPORTANT NOTES:
 
 ═══════════════════════════════════════════════════════════════════════════════
 
+═══════════════════════════════════════════════════════════════════════════════
+
+**Query Type 9: "Find similar microwatersheds using Propensity Score Matching (PSM)"**
+✅ CORRECT LAYERS: drought + cropping intensity + terrain vector + LULC vector (ALL from SAME fetch)
+⛔ NEVER return layer-specific IDs like `dharwad_navalgund_drought.1` — ALWAYS return the `uid` column (e.g., `18_16157`)
+⛔ NEVER use cosine similarity for this query type — use PROPENSITY SCORE MATCHING
+
+🔴 MANDATORY: For this query type, COPY the code from EXAMPLE 7 below almost verbatim.
+   Propensity Score Matching (PSM) treats the target MWS as the "treated" unit (treatment=1)
+   and all others as "control" (treatment=0). A logistic regression model predicts the
+   propensity score (probability of being the target). MWS with the closest propensity
+   scores to the target are the most similar.
+   ⚠️ DO NOT write your own loading code — use EXACTLY the layer loading pattern from EXAMPLE 7.
+   The pattern is: `drought_gdf = pd.concat([gpd.read_file(u['url']) for u in layer['urls']], ignore_index=True)`
+   ⚠️ DO NOT use cosine_similarity — this query MUST use LogisticRegression propensity scores.
+
+⚠️ CRITICAL LAYER NAME MATCHING (same as Query Type 8):
+- Drought layer: `'drought' in name.lower()` AND `'causality' not in name.lower()`
+- Cropping Intensity: `'cropping' in name.lower() and 'intensity' in name.lower()`
+- Terrain Vector: `'terrain' in name.lower() and 'lulc' not in name.lower() and 'raster' not in name.lower()`
+- LULC Vector: `'lulc' in name.lower()` AND `'terrain' not in name.lower()` AND `'level' not in name.lower()`
+- ALWAYS print ALL vector layer names FIRST
+
+LAYER SCHEMAS (same as Query Type 8):
+- **Drought** (115 MWS): `uid`, `drysp_2017..2022`, `w_sev_2017..2022`, `w_mod_2017..2022`, `w_mld_2017..2022`, `avg_dryspell`
+- **Cropping Intensity** (115 MWS): `uid`, `cropping_intensity_2017..2024`
+- **Terrain** (115 MWS): `uid`, `hill_slope`, `plain_area`, `ridge_area`, `slopy_area`, `valley_are`, `terrainClu`
+- **LULC** (115 MWS, 101 cols): `uid`, plus per-year columns for each land use class
+
+CORRECT METHODOLOGY (Propensity Score Matching):
+1. Call fetch_corestack_data ONCE → get vector_layers list
+2. Print ALL layer names
+3. Find and load: drought, cropping intensity, terrain, LULC — all as GeoDataFrames
+4. Print columns of each to verify
+5. Merge all on `uid` column (inner join, drop geometry except from first)
+6. Select numeric feature columns (exclude `id`, `uid`, `geometry`, `area_in_ha`, `sum`)
+7. Create binary treatment column: treatment=1 for target MWS, treatment=0 for all others
+8. Fill NaN with 0, normalize with StandardScaler
+9. Fit logistic regression: treatment ~ features → get propensity scores for ALL MWS
+10. Compute absolute difference in propensity score between target and each other MWS
+11. Rank by ASCENDING propensity score difference (smallest diff = most similar)
+12. Take top N matches
+13. Return results with `uid` as the MWS identifier + propensity_score + ps_distance
+14. Export top matched MWS geometries as GeoJSON
+
+⚠️ IMPORTANT NOTES:
+- Use `sklearn.linear_model.LogisticRegression` with `max_iter=1000` and `solver='lbfgs'`
+- The propensity score is `model.predict_proba(X)[:, 1]` — the probability of being "treated"
+- ps_distance = abs(target_ps - other_ps). Smallest distance = best match.
+- ⚠️ LOCATION: Same as Query Type 8. ALWAYS include location in fetch_corestack_data call.
+- Drop GeoServer `id` column from export. Use `uid` as identifier.
+
+═══════════════════════════════════════════════════════════════════════════════
+
 Instructions:
 1. **CORESTACK PRIORITY (PRIMARY)**: For ANY query about India or Indian locations, you MUST call fetch_corestack_data FIRST to access CoreStack database. Available CoreStack layers:
    - Raster: {', '.join(CORESTACK_DATA_PRODUCTS['raster_layers'])}
@@ -1373,6 +1427,105 @@ For multi-region layers: Read ALL URLs, concat GeoDataFrames, then analyze.
 			top_gdf = top_gdf[keep_cols]
 			top_gdf.to_file('./exports/similar_microwatersheds.geojson', driver='GeoJSON')
 
+	# ╔══════════════════════════════════════════════════════════════╗
+		# ║ EXAMPLE 7: MWS SIMILARITY — PROPENSITY SCORE MATCHING        ║
+		# ║ ⚠️ For Query Type 9, COPY THIS CODE ALMOST VERBATIM.         ║
+		# ║ Loads 4 layers, merges on uid, logistic regression PSM       ║
+		# ╚══════════════════════════════════════════════════════════════╝
+		# FIRST: Print all vector layer names
+		print("Available vector layers:")
+		for layer in vector_layers:
+			print(f"  - {{layer['layer_name']}}")
+
+		# Step 1: Load 4 layers — drought, cropping, terrain, LULC
+		drought_gdf = None
+		crop_gdf = None
+		terrain_gdf = None
+		lulc_gdf = None
+		for layer in vector_layers:
+			lname = layer['layer_name'].lower()
+			if 'drought' in lname and 'causality' not in lname and drought_gdf is None:
+				print(f"Found drought layer: {{layer['layer_name']}}")
+				drought_gdf = pd.concat([gpd.read_file(u['url']) for u in layer['urls']], ignore_index=True)
+			if 'cropping' in lname and 'intensity' in lname and crop_gdf is None:
+				print(f"Found cropping layer: {{layer['layer_name']}}")
+				crop_gdf = pd.concat([gpd.read_file(u['url']) for u in layer['urls']], ignore_index=True)
+			if 'terrain' in lname and 'lulc' not in lname and 'raster' not in lname and terrain_gdf is None:
+				print(f"Found terrain layer: {{layer['layer_name']}}")
+				terrain_gdf = pd.concat([gpd.read_file(u['url']) for u in layer['urls']], ignore_index=True)
+			if 'lulc' in lname and 'terrain' not in lname and 'level' not in lname and lulc_gdf is None:
+				print(f"Found LULC layer: {{layer['layer_name']}}")
+				lulc_gdf = pd.concat([gpd.read_file(u['url']) for u in layer['urls']], ignore_index=True)
+
+		# Step 2: Print columns
+		for name, gdf in [('Drought', drought_gdf), ('Cropping', crop_gdf), ('Terrain', terrain_gdf), ('LULC', lulc_gdf)]:
+			if gdf is not None:
+				print(f"{{name}} columns ({{len(gdf.columns)}}): {{gdf.columns.tolist()[:15]}}...")
+
+		# Step 3: Drop geometry from all except drought_gdf, then merge on 'uid'
+		merged = drought_gdf.drop(columns=['geometry'])
+		for gdf in [crop_gdf, terrain_gdf, lulc_gdf]:
+			if gdf is not None:
+				cols_to_drop = ['geometry', 'id', 'area_in_ha', 'sum']
+				gdf_clean = gdf.drop(columns=[c for c in cols_to_drop if c in gdf.columns])
+				merged = merged.merge(gdf_clean, on='uid', how='inner', suffixes=('', f'_{{gdf.columns[2][:4]}}'))
+		print(f"Merged shape: {{merged.shape}}")
+
+		# Step 4: Select numeric columns only
+		exclude_cols = ['id', 'uid', 'geometry', 'area_in_ha', 'sum', 'terrainClu']
+		feature_cols = [c for c in merged.columns if c not in exclude_cols and merged[c].dtype in ['float64', 'int64', 'float32', 'int32']]
+		print(f"Feature columns ({{len(feature_cols)}}): {{feature_cols[:20]}}...")
+
+		# Step 5: Build feature matrix, create treatment, normalize
+		import numpy as np
+		from sklearn.preprocessing import StandardScaler
+		from sklearn.linear_model import LogisticRegression
+
+		target_uid = '18_16157'  # Replace with the uid from the query
+		merged['treatment'] = (merged['uid'] == target_uid).astype(int)
+
+		X = merged[feature_cols].fillna(0).values
+		y = merged['treatment'].values
+		scaler = StandardScaler()
+		X_scaled = scaler.fit_transform(X)
+
+		# Step 6: Fit logistic regression to estimate propensity scores
+		model = LogisticRegression(max_iter=1000, solver='lbfgs')
+		model.fit(X_scaled, y)
+		propensity_scores = model.predict_proba(X_scaled)[:, 1]
+		merged['propensity_score'] = propensity_scores
+		print(f"Propensity score range: {{propensity_scores.min():.6f}} — {{propensity_scores.max():.6f}}")
+
+		# Step 7: Get target's propensity score and compute distances
+		target_idx = merged.index[merged['uid'] == target_uid]
+		if len(target_idx) == 0:
+			print(f"Target uid {{target_uid}} not found! Available uids: {{merged['uid'].tolist()[:10]}}")
+		else:
+			target_ps = merged.loc[target_idx[0], 'propensity_score']
+			merged['ps_distance'] = abs(merged['propensity_score'] - target_ps)
+
+			# Exclude target, sort by smallest distance (most similar)
+			others = merged[merged['uid'] != target_uid].sort_values('ps_distance', ascending=True)
+			top_n = 10
+			top = others.head(top_n)[['uid', 'propensity_score', 'ps_distance']]
+			print(f"Target {{target_uid}} propensity score: {{target_ps:.6f}}")
+			print(f"Top {{top_n}} PSM-matched MWS to {{target_uid}}:")
+			print(top.to_string())
+
+			# Step 8: Export GeoJSON with geometries — CLEAN output
+			top_uids = top['uid'].tolist()
+			top_gdf = drought_gdf[drought_gdf['uid'].isin(top_uids + [target_uid])].copy()
+			top_gdf = top_gdf.merge(merged[['uid', 'propensity_score', 'ps_distance']], on='uid', how='left')
+			if 'id' in top_gdf.columns:
+				top_gdf = top_gdf.drop(columns=['id'])
+			keep_cols = ['uid', 'propensity_score', 'ps_distance', 'area_in_ha', 'avg_dryspell', 'geometry']
+			for c in top_gdf.columns:
+				if any(c.startswith(p) for p in ['drysp_', 'w_sev_', 'w_mod_', 'w_mld_', 'cropping_intensity', 'hill_slope', 'plain_area', 'ridge_area', 'slopy_area', 'valley_are']):
+					keep_cols.append(c)
+			keep_cols = [c for c in keep_cols if c in top_gdf.columns]
+			top_gdf = top_gdf[keep_cols]
+			top_gdf.to_file('./exports/psm_matched_microwatersheds.geojson', driver='GeoJSON')
+
 	elif data['success'] and data['data_type'] == 'timeseries':
 		# Access timeseries data
 		timeseries = data['timeseries_data']
@@ -1411,7 +1564,7 @@ For multi-region layers: Read ALL URLs, concat GeoDataFrames, then analyze.
 - Filtered vectors: GeoJSON files with spatial filtering (e.g., villages with drought, high sensitivity microwatersheds)
 - Village-level drought: Unique village names with drought stats, exported as GeoJSON (dissolved by village)
 - Rankings: CSV or tables showing ranked microwatersheds/villages by various dimensions
-- Similarity analysis: Top-K similar microwatersheds based on multiple attributes
+- Similarity analysis: Top-K similar microwatersheds based on multiple attributes (cosine similarity OR propensity score matching)
 - Scatterplots: 2D plots showing relationships between variables, with quadrant analysis where applicable
 
 **IMPORTANT NOTES**:
@@ -1572,14 +1725,14 @@ if __name__ == "__main__":
 	# run_hybrid_agent("find all microwatersheds in Navalgund tehsil, Dharwad district in Karnataka, with highest surface water availability senstivity to drought")
 
 
-	print("Running query #8 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
-	print("="*70)
-	run_hybrid_agent("find me microwatersheds in Navalgund tehsil, Dharwad district, Karnataka most similar to 18_16157 uid microwatershed, based on its terrain, drought frequency, LULC and cropping intensity")
-
-
-	# print("Running query #7 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+	# print("Running query #8 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
 	# print("="*70)
-	# run_hybrid_agent("find all microwatersheds in Navalgund tehsil, Dharwad district in Karnataka, with highest surface water availability senstivity to drought")
+	# run_hybrid_agent("find me microwatersheds in Navalgund tehsil, Dharwad district, Karnataka most similar to 18_16157 uid microwatershed, based on its terrain, drought frequency, LULC and cropping intensity")
+
+
+	print("Running query #9 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+	print("="*70)
+	run_hybrid_agent("find me microwatersheds most similar to 18_16157 id microwatershed in Navalgund, Dharwad, Karnataka, based on its terrain, drought frequency, and LULC using propensity score matching")
 
 
 	# print("Running query #7 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
