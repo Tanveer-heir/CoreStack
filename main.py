@@ -58,7 +58,6 @@ CORESTACK_DATA_PRODUCTS = {
 		"terrain_raster",
 		"change_tree_cover_gain_raster",
 		"change_tree_cover_loss_raster",
-		"change_urbanization_raster",
 		"change_cropping_reduction_raster",
 		"change_cropping_intensity_raster",
 		"tree_canopy_cover_density_raster",
@@ -743,14 +742,32 @@ FALLBACK: If custom time period (e.g., "2018-2024"):
 - Use land_use_land_cover_raster for specific years
 - Compare class 6 (trees) presence across years manually
 
-**Query Type 4: "Cropland to Built-up Conversion in [Village]"**
-✅ CORRECT: change_urbanization_raster (change raster)
+**Query Type 4: "Change in Urbanization / Land Cover Change in [Village]"**
+✅ CORRECT APPROACH: Compare LULC rasters across two years (LULC comparison)
+⛔ NEVER use any layer with "Urbanization" or "change_urbanization" in the name. Those layers return 404.
+⛔ NEVER search for "change_urbanization_raster". It does NOT work.
 
-WHY?
-- Pre-computed transition: Crops/Trees → Built-up
-- Class 3 specifically = "Crops → Built-up" (THIS IS WHAT YOU WANT!)
-- Period: 2017-2022 composite
-- Analysis: Filter to class 3, count pixels, convert to hectares
+INSTEAD, you MUST:
+1. From the fetched CoreStack data, find LULC raster layers (layer_name contains "LULC" or dataset_name contains "LULC_level_3")
+   - Example layer names: LULC_17_18_dharwad_navalgund_level_3, LULC_24_25_dharwad_navalgund_level_3
+2. Pick the EARLIEST available LULC (e.g., LULC_17_18) and the MOST RECENT (e.g., LULC_24_25)
+3. Download BOTH rasters using requests.get() and save to ./exports/
+4. Open both with rasterio, read band 1
+5. LULC class codes:
+   - 0: Background, 1: Built-up, 2: Water (Kharif), 3: Water (Kharif+Rabi)
+   - 4: Water (Kharif+Rabi+Zaid), 6: Tree/Forests, 7: Barrenlands
+   - 8: Single cropping cropland, 9: Single Non-Kharif cropping cropland
+   - 10: Double cropping cropland, 11: Triple cropping cropland, 12: Shrub_Scrub
+6. Reproject to EPSG:32643 for area calculation
+7. Compute per-class pixel count and area (hectares) for BOTH years
+8. Create a CHANGE MAP: where old != new, highlight changed pixels
+9. For urbanization: count pixels that became class 1 (Built-up) in recent LULC but were NOT class 1 in old LULC
+10. Export: change map GeoTIFF, area comparison CSV, visualization PNG
+
+WHY LULC COMPARISON?
+- Pre-computed change rasters return 404 and are unreliable
+- LULC comparison gives you FULL CONTROL over time period and class transitions
+- You get BOTH area statistics AND a spatial change map
 
 ═══════════════════════════════════════════════════════════════════════════════
 
@@ -774,13 +791,14 @@ b) **change_tree_cover_gain_raster**: Tree cover gain 2017-2022
    - Use for: "tree cover gain", "reforestation"
    - MASK to class 1 to get gain areas
 
-c) **change_urbanization_raster**: Built-up expansion 2017-2022
-   - Class 1: BuiltUp → BuiltUp (stable)
-   - Class 2: NonBuiltUp → BuiltUp (new urbanization)
-   - Class 3: Crops → BuiltUp (CROPLAND TO BUILT-UP CONVERSION)
-   - Class 4: Forest → BuiltUp (forest lost to urban)
-   - Use for: "cropland to built-up", "urban expansion", "loss of agricultural land"
-   - MASK to class 3 for cropland-to-urban conversion
+c) **Urbanization / Land Cover Change**: ⛔ NEVER use change_urbanization_raster or any "Urbanization" change detection layer (they 404).
+   Instead, ALWAYS compare TWO LULC rasters (earliest vs most recent):
+   - Find layers with "LULC" in layer_name (e.g., LULC_17_18_*, LULC_24_25_*)
+   - Download both via requests.get(), save to ./exports/, open with rasterio
+   - LULC Classes: 0=Background, 1=Built-up, 2=Water(Kharif), 3=Water(Kharif+Rabi), 4=Water(Kharif+Rabi+Zaid), 6=Trees, 7=Barrenlands, 8=Single crop, 9=Single Non-Kharif crop, 10=Double crop, 11=Triple crop, 12=Shrub_Scrub
+   - Reproject to EPSG:32643 for area in hectares
+   - Compare pixel classes, compute per-class area for both years
+   - Export: change GeoTIFF + area stats CSV + PNG visualization
 
 d) **change_cropping_reduction_raster**: Cropland degradation 2017-2022
    - Shows areas where cropping intensity decreased
@@ -800,13 +818,26 @@ g) **surface_water_bodies_vector**: Water bodies with temporal attributes
 
 h) **drought_frequency_vector**: Drought severity mapping
    - Use for: "drought affected areas", "drought frequency"
+   - ⚠️ CRITICAL: You MUST call fetch_corestack_data ONCE and use BOTH drought + admin layers from the SAME response.
+   - The response already contains ALL layers (29+ vectors). Do NOT call fetch_corestack_data twice.
+   - Workflow (follow EXAMPLE 3 in the code examples below):
+     1. Call fetch_corestack_data ONCE → get vector_layers list
+     2. Find the layer with 'drought' in layer_name → load as drought_gdf
+     3. Find the layer with 'admin' AND 'boundar' in layer_name → load as admin_gdf
+     4. Print admin_gdf.columns to discover the village name column
+     5. The village name column is **vill_name** (text names). NEVER use vill_ID (numeric IDs) or geometry columns.
+     6. Spatial join: `gpd.sjoin(drought_gdf, admin_gdf[['vill_name', 'geometry']], how='left', predicate='intersects')`
+     7. Get unique village names: `sorted(joined['vill_name'].unique().tolist())`
+     8. Dissolve by village name for GeoJSON export
+   - Output: list of unique village names + a GeoJSON with one polygon per village (dissolved from microwatersheds)
 
 **IMPORTANT: MICROWATERSHED-LEVEL DATA**:
 CoreStack data is provided at **microwatershed (MWS) level**, NOT village level. Each polygon represents a small watershed area within the tehsil. When analyzing a village:
 1. The data contains ALL microwatersheds in the tehsil covering the village area
-2. NO village name column exists - data is at finer granularity
-3. For village-level analysis: Aggregate statistics across all microwatersheds (use mean, sum, etc.)
+2. NO village name column exists in drought/cropping layers - data is at finer granularity
+3. To get village names: Load **admin_boundaries_vector** separately and do a spatial join
 4. Use `uid` column for microwatershed identification
+5. For drought queries: ALWAYS resolve to village names via spatial join with admin_boundaries_vector
 
 **MULTI-REGION DATA SUPPORT**:
 When village spans multiple tehsils, layers will have MULTIPLE URLs in the 'urls' array.
@@ -887,6 +918,47 @@ For multi-region layers: Read ALL URLs, concat GeoDataFrames, then analyze.
 					loss_area_ha = loss_area_pixels * pixel_area / 10000
 					print(f"Tree cover loss: {{loss_area_ha:.2f}} hectares")
 
+		# EXAMPLE 3: DROUGHT + VILLAGE NAMES (Spatial Join with Admin Boundaries)
+		# Step 1: Find and load drought_frequency_vector
+		drought_gdf = None
+		for layer in vector_layers:
+			if 'drought' in layer['layer_name'].lower():
+				all_gdfs = []
+				for url_info in layer['urls']:
+					gdf = gpd.read_file(url_info['url'])
+					all_gdfs.append(gdf)
+				drought_gdf = pd.concat(all_gdfs, ignore_index=True).to_crs('EPSG:4326')
+				break
+
+		# Step 2: Find and load admin_boundaries_vector
+		admin_gdf = None
+		for layer in vector_layers:
+			if 'admin' in layer['layer_name'].lower() and 'boundar' in layer['layer_name'].lower():
+				all_gdfs = []
+				for url_info in layer['urls']:
+					gdf = gpd.read_file(url_info['url'])
+					all_gdfs.append(gdf)
+				admin_gdf = pd.concat(all_gdfs, ignore_index=True).to_crs('EPSG:4326')
+				break
+
+		if drought_gdf is not None and admin_gdf is not None:
+			# Step 3: Use vill_name column (the village name column in admin_boundaries_vector)
+			print("Admin boundary columns:", admin_gdf.columns.tolist())
+			village_col = 'vill_name'  # This is the correct column with village names
+			print(f"Using village column: {{village_col}}")
+
+			# Step 4: Spatial join
+			joined = gpd.sjoin(drought_gdf, admin_gdf[[village_col, 'geometry']], how='left', predicate='intersects')
+			joined = joined.dropna(subset=[village_col])
+
+			# Step 5: Get unique village names
+			unique_villages = sorted(joined[village_col].unique().tolist())
+			print(f"Unique drought-affected villages ({{len(unique_villages)}}): {{unique_villages}}")
+
+			# Step 6: Dissolve by village for export GeoJSON
+			village_dissolved = joined.dissolve(by=village_col, aggfunc='first').reset_index()
+			village_dissolved.to_file('./exports/drought_affected_villages.geojson', driver='GeoJSON')
+
 	elif data['success'] and data['data_type'] == 'timeseries':
 		# Access timeseries data
 		timeseries = data['timeseries_data']
@@ -923,6 +995,7 @@ For multi-region layers: Read ALL URLs, concat GeoDataFrames, then analyze.
 - Time series plots: Line charts showing temporal trends (e.g., cropping intensity over years, surface water over years)
 - Change rasters: GeoTIFF files with change detection (e.g., tree cover change, cropland to built-up conversion) + total area statistics in hectares
 - Filtered vectors: GeoJSON files with spatial filtering (e.g., villages with drought, high sensitivity microwatersheds)
+- Village-level drought: Unique village names with drought stats, exported as GeoJSON (dissolved by village)
 - Rankings: CSV or tables showing ranked microwatersheds/villages by various dimensions
 - Similarity analysis: Top-K similar microwatersheds based on multiple attributes
 - Scatterplots: 2D plots showing relationships between variables, with quadrant analysis where applicable
@@ -1055,6 +1128,10 @@ if __name__ == "__main__":
 	print("Bot TEST")
 	print("="*70)
 
+	print("Running query #5 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+	print("="*70)
+	run_hybrid_agent("Which villages in Navalgund, Dharwad Karnataka among the ones available on Core Stack have experienced droughts? ")
+
 	# print("Running query #1 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
 	# print("="*70)
 	# run_hybrid_agent("Could you show how cropping intensity has changed over the years in Navalgund, Dharwad, Karnataka?")
@@ -1067,6 +1144,14 @@ if __name__ == "__main__":
 	# print("="*70)
 	# run_hybrid_agent("Can you show me areas that have lost tree cover in Navalgund, Dharwad, Karnataka since 2018? also hectares of degraded area?")
 
-	print("Running query #4 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
-	print("="*70)
-	run_hybrid_agent("How much cropland in Navalgund, Dharwad, Karnataka has turned into built up since 2018? can you show me those regions?")
+	# print("Running query #4 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+	# print("="*70)
+	# run_hybrid_agent("How much cropland in Navalgund, Dharwad, Karnataka has turned into built up since 2018? can you show me those regions?")
+
+
+	# print("Running query #4 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+	# print("="*70)
+	# run_hybrid_agent("How much cropland in Navalgund, Dharwad, Karnataka has turned into built up since 2018? can you show me those regions?")
+	# print("Running query #4 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+	# print("="*70)
+	# run_hybrid_agent("How much cropland in Navalgund, Dharwad, Karnataka has turned into built up since 2018? can you show me those regions?")
