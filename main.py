@@ -823,6 +823,111 @@ WHY THIS APPROACH?
 
 ═══════════════════════════════════════════════════════════════════════════════
 
+**Query Type 6: "Microwatersheds with highest surface water availability sensitivity to drought"**
+✅ CORRECT LAYERS: drought layer + surface water bodies layer (both from SAME fetch)
+⛔ NEVER use np.corrcoef on w_sev columns (they are mostly zero → NaN)
+⛔ NEVER invent column names — print columns FIRST to verify
+
+🔴 MANDATORY: For this query type, COPY the code from EXAMPLE 5 below almost verbatim.
+   Use TABULAR merge (not spatial join): merge drought_gdf with aggregated surface water on `uid` == `MWS_UID`.
+   After merge, iterate rows (one per MWS) and compare surface water area in drought vs non-drought years.
+
+⚠️ CRITICAL LAYER NAME MATCHING:
+- Drought layer: `"Drought (dharwad_navalgund_drought)"` — match with `'drought' in name.lower()` AND `'causality' not in name.lower()`
+- Surface water layer: `"Surface Water Bodies (surface_waterbodies_dharwad_navalgund)"` — match with `'surface water' in name.lower()` AND `'zoi' not in name.lower()`
+- There are TWO surface water layers — use the one WITHOUT 'zoi' in its name
+- ALWAYS print ALL vector layer names FIRST
+
+SURFACE WATER DATA COLUMN REFERENCE:
+- `area_YY-YY`: Water spread area in hectares for hydro-year (e.g., `area_17-18` = 2017-18 hydro-year)
+- `k_YY-YY`: Kharif season water availability (%)
+- `kr_YY-YY`: Kharif+Rabi season water availability (%)
+- `krz_YY-YY`: Kharif+Rabi+Zaid season water availability (%)
+- `MWS_UID`: Microwatershed UID (matches `uid` in drought layer)
+- `Village Name`: Village name (already present — no need for admin boundary join!)
+- Each row is ONE water body (2798 total) — multiple water bodies per MWS
+
+YEAR MAPPING (drought calendar year → surface water hydro-year):
+- drysp_2017 → area_17-18
+- drysp_2018 → area_18-19
+- drysp_2019 → area_19-20
+- drysp_2020 → area_20-21
+- drysp_2021 → area_21-22
+- drysp_2022 → area_22-23
+
+CORRECT METHODOLOGY (surface water sensitivity analysis):
+1. Call fetch_corestack_data ONCE → get vector_layers list
+2. Print ALL layer names
+3. Find drought layer: `'drought' in name.lower()` AND `'causality' not in name.lower()`
+4. Find surface water layer: `'surface water' in name.lower()` AND `'zoi' not in name.lower()`
+5. Load both as GeoDataFrames
+6. Print columns of both GDFs
+7. Aggregate surface water area by MWS: `sw_by_mws = sw_gdf.groupby('MWS_UID')[area_cols].sum().reset_index()`
+8. Merge drought_gdf with sw_by_mws on `uid` == `MWS_UID` (tabular merge, NOT spatial join)
+9. For EACH MWS (iterate merged rows):
+   a) Map drought years to hydro-years: drysp_2017 → area_17-18, etc.
+   b) If drysp_YYYY > 0 → DROUGHT YEAR: collect area_YY-(YY+1)
+   c) If drysp_YYYY == 0 → NON-DROUGHT YEAR: collect area_YY-(YY+1)
+   d) sensitivity_score = mean_non_drought_area - mean_drought_area (positive = water drops during drought)
+10. Rank by sensitivity_score DESCENDING (highest drop = most sensitive)
+11. Take top N, export as GeoJSON with sensitivity scores
+
+WHY TABULAR MERGE (not spatial join)?
+- Both drought and surface water layers share MWS identifiers (uid / MWS_UID)
+- Surface water has ~2798 water bodies → must aggregate by MWS_UID first
+- Spatial join would create many-to-many duplicates; tabular merge is cleaner and faster
+- After groupby + sum, we get one row per MWS with total water area per year
+
+═══════════════════════════════════════════════════════════════════════════════
+
+**Query Type 8: "Find microwatersheds most similar to a given MWS (by uid)"**
+✅ CORRECT LAYERS: drought + cropping intensity + terrain vector + LULC vector (ALL from SAME fetch)
+⛔ NEVER return layer-specific IDs like `dharwad_navalgund_drought.1` — ALWAYS return the `uid` column (e.g., `18_16157`)
+⛔ NEVER use simple boolean equality — use proper distance metrics on numeric features
+
+🔴 MANDATORY: For this query type, COPY the code from EXAMPLE 6 below almost verbatim.
+   The `uid` column is the ACTUAL MWS identifier shared across ALL layers.
+   Load 4 layers, merge on `uid`, build feature matrix, normalize, compute cosine similarity.
+
+⚠️ CRITICAL LAYER NAME MATCHING:
+- Drought layer: `'drought' in name.lower()` AND `'causality' not in name.lower()`
+- Cropping Intensity: `'cropping' in name.lower() and 'intensity' in name.lower()`
+- Terrain Vector: `'terrain' in name.lower() and 'vector' not in name.lower()` (it's `"Terrain Vector (dharwad_navalgund_cluster)"`)
+- LULC Vector: `'lulc' in name.lower()` AND `'terrain' not in name.lower()` AND `'level' not in name.lower()` (it's `"LULC (lulc_vector_dharwad_navalgund)"`)
+- ALWAYS print ALL vector layer names FIRST
+
+LAYER SCHEMAS (what columns to use from each):
+- **Drought** (115 MWS): `uid`, `drysp_2017..2022` (dry spell weeks), `w_sev_2017..2022`, `w_mod_2017..2022`, `w_mld_2017..2022`, `avg_dryspell`
+- **Cropping Intensity** (115 MWS): `uid`, `cropping_intensity_2017..2024`
+- **Terrain** (115 MWS): `uid`, `hill_slope`, `plain_area`, `ridge_area`, `slopy_area`, `valley_are`, `terrainClu`
+- **LULC** (115 MWS, 101 cols): `uid`, plus per-year columns for each land use class (barrenland, built-up, cropland, tree_forest, shrub_scrub, etc.)
+   Column names are truncated (e.g., `barrenla_1`, `built-up_2`, `cropland_3`)
+
+CORRECT METHODOLOGY (MWS similarity analysis):
+1. Call fetch_corestack_data ONCE → get vector_layers list
+2. Print ALL layer names
+3. Find and load: drought, cropping intensity, terrain, LULC — all as GeoDataFrames
+4. Print columns of each to verify
+5. Merge all 4 on `uid` column (inner join, drop geometry except from first)
+6. Select numeric feature columns (exclude `id`, `uid`, `geometry`, `area_in_ha`, `sum`)
+7. Fill NaN with 0, then normalize with sklearn StandardScaler (or manual z-score)
+8. Compute cosine similarity between the TARGET MWS row and ALL other rows
+9. Rank by similarity DESCENDING, take top N
+10. Return results with `uid` as the MWS identifier
+11. Export top similar MWS geometries as GeoJSON
+
+IMPORTANT NOTES:
+- The user provides a `uid` like `18_16157` — this is the MWS_UID shared across layers
+- If user provides a layer-specific ID like `dharwad_navalgund_drought.1`, look up its `uid` first
+- ALL results MUST show `uid` (e.g., `18_22769`), NOT layer IDs (e.g., `dharwad_navalgund_drought.1`)
+- Use cosine similarity from sklearn.metrics.pairwise or scipy.spatial.distance
+- StandardScaler ensures features with different scales contribute equally
+- ⚠️ LOCATION: The user query may mention a location OR the MWS uid implies a tehsil.
+  When calling fetch_corestack_data, you MUST include a location (e.g., "Navalgund tehsil Dharwad Karnataka terrain drought LULC cropping intensity data").
+  If the query doesn't mention a location, add it to the fetch call based on context.
+
+═══════════════════════════════════════════════════════════════════════════════
+
 Instructions:
 1. **CORESTACK PRIORITY (PRIMARY)**: For ANY query about India or Indian locations, you MUST call fetch_corestack_data FIRST to access CoreStack database. Available CoreStack layers:
    - Raster: {', '.join(CORESTACK_DATA_PRODUCTS['raster_layers'])}
@@ -1092,6 +1197,182 @@ For multi-region layers: Read ALL URLs, concat GeoDataFrames, then analyze.
 			top_gdf = top_gdf.merge(top[['id', 'sensitivity_score']], on='id')
 			top_gdf.to_file('./exports/top_sensitive_microwatersheds.geojson', driver='GeoJSON')
 
+		# ╔══════════════════════════════════════════════════════════════╗
+		# ║ EXAMPLE 5: SURFACE WATER SENSITIVITY TO DROUGHT             ║
+		# ║ ⚠️ For Query Type 6, COPY THIS CODE ALMOST VERBATIM.         ║
+		# ║ Uses TABULAR merge on uid == MWS_UID (NOT spatial join)      ║
+		# ╚══════════════════════════════════════════════════════════════╝
+		# FIRST: Print all vector layer names
+		print("Available vector layers:")
+		for layer in vector_layers:
+			print(f"  - {{layer['layer_name']}}")
+
+		# Step 1: Find drought layer (NOT causality) and surface water layer (NOT zoi)
+		drought_gdf = None
+		sw_gdf = None
+		for layer in vector_layers:
+			lname = layer['layer_name'].lower()
+			if 'drought' in lname and 'causality' not in lname and drought_gdf is None:
+				print(f"Found drought layer: {{layer['layer_name']}}")
+				drought_gdf = pd.concat([gpd.read_file(u['url']) for u in layer['urls']], ignore_index=True).to_crs('EPSG:4326')
+			if 'surface water' in lname and 'zoi' not in lname and sw_gdf is None:
+				print(f"Found surface water layer: {{layer['layer_name']}}")
+				sw_gdf = pd.concat([gpd.read_file(u['url']) for u in layer['urls']], ignore_index=True).to_crs('EPSG:4326')
+
+		if drought_gdf is not None and sw_gdf is not None:
+			import numpy as np
+			# IMPORTANT: Print columns of both GDFs
+			print(f"Drought GDF columns: {{drought_gdf.columns.tolist()}}")
+			print(f"Surface water GDF columns: {{sw_gdf.columns.tolist()}}")
+			print(f"Surface water shape: {{sw_gdf.shape}}")
+			print(f"Drought GDF 'uid' sample: {{drought_gdf['uid'].head().tolist()}}")
+			print(f"Surface water 'MWS_UID' sample: {{sw_gdf['MWS_UID'].head().tolist()}}")
+
+			# Step 2: Aggregate surface water area by MWS_UID
+			area_cols = [c for c in sw_gdf.columns if c.startswith('area_') and '-' in c]
+			print(f"Area columns found: {{area_cols}}")
+			sw_by_mws = sw_gdf.groupby('MWS_UID')[area_cols].sum().reset_index()
+			print(f"Aggregated {{len(sw_by_mws)}} MWS from {{len(sw_gdf)}} water bodies")
+
+			# Step 3: Tabular merge drought with aggregated surface water
+			merged = drought_gdf.merge(sw_by_mws, left_on='uid', right_on='MWS_UID', how='inner')
+			print(f"Merged shape: {{merged.shape}}")
+
+			# Step 4: Year mapping — drought calendar year → surface water hydro-year
+			year_map = {{
+				2017: 'area_17-18', 2018: 'area_18-19', 2019: 'area_19-20',
+				2020: 'area_20-21', 2021: 'area_21-22', 2022: 'area_22-23'
+			}}
+
+			# Step 5: For each MWS, compute surface water sensitivity
+			results = []
+			for idx, row in merged.iterrows():
+				drought_sw = []
+				non_drought_sw = []
+				for yr, area_col in year_map.items():
+					drysp_col = f'drysp_{{yr}}'
+					if drysp_col not in merged.columns or area_col not in merged.columns:
+						continue
+					drysp_val = row[drysp_col]
+					sw_val = row[area_col]
+					if pd.isna(drysp_val) or pd.isna(sw_val):
+						continue
+					if drysp_val > 0:  # drought year
+						drought_sw.append(sw_val)
+					else:
+						non_drought_sw.append(sw_val)
+				if drought_sw and non_drought_sw:
+					avg_drought = np.mean(drought_sw)
+					avg_non_drought = np.mean(non_drought_sw)
+					sensitivity = avg_non_drought - avg_drought  # positive = water drops during drought
+					results.append({{'id': row['id'], 'uid': row['uid'], 'avg_sw_drought': avg_drought, 'avg_sw_non_drought': avg_non_drought, 'sensitivity_score': sensitivity}})
+
+			# Step 6: Rank by sensitivity (descending = most sensitive first)
+			sens_df = pd.DataFrame(results).sort_values('sensitivity_score', ascending=False)
+			top_n = 10
+			top = sens_df.head(top_n)
+			print(f"Top {{top_n}} MWS by surface water sensitivity to drought:\n{{top}}")
+
+			# Step 7: Export top MWS geometries
+			top_gdf = drought_gdf[drought_gdf['id'].isin(top['id'].tolist())].copy()
+			top_gdf = top_gdf.merge(top[['id', 'sensitivity_score']], on='id')
+			top_gdf.to_file('./exports/top_sw_sensitive_microwatersheds.geojson', driver='GeoJSON')
+
+		# ╔══════════════════════════════════════════════════════════════╗
+		# ║ EXAMPLE 6: MWS SIMILARITY CLUSTERING                         ║
+		# ║ ⚠️ For Query Type 8, COPY THIS CODE ALMOST VERBATIM.         ║
+		# ║ Loads 4 layers, merges on uid, cosine similarity             ║
+		# ╚══════════════════════════════════════════════════════════════╝
+		# FIRST: Print all vector layer names
+		print("Available vector layers:")
+		for layer in vector_layers:
+			print(f"  - {{layer['layer_name']}}")
+
+		# Step 1: Load 4 layers — drought, cropping, terrain, LULC
+		drought_gdf = None
+		crop_gdf = None
+		terrain_gdf = None
+		lulc_gdf = None
+		for layer in vector_layers:
+			lname = layer['layer_name'].lower()
+			if 'drought' in lname and 'causality' not in lname and drought_gdf is None:
+				print(f"Found drought layer: {{layer['layer_name']}}")
+				drought_gdf = pd.concat([gpd.read_file(u['url']) for u in layer['urls']], ignore_index=True)
+			if 'cropping' in lname and 'intensity' in lname and crop_gdf is None:
+				print(f"Found cropping layer: {{layer['layer_name']}}")
+				crop_gdf = pd.concat([gpd.read_file(u['url']) for u in layer['urls']], ignore_index=True)
+			if 'terrain' in lname and 'lulc' not in lname and 'raster' not in lname and terrain_gdf is None:
+				print(f"Found terrain layer: {{layer['layer_name']}}")
+				terrain_gdf = pd.concat([gpd.read_file(u['url']) for u in layer['urls']], ignore_index=True)
+			if 'lulc' in lname and 'terrain' not in lname and 'level' not in lname and lulc_gdf is None:
+				print(f"Found LULC layer: {{layer['layer_name']}}")
+				lulc_gdf = pd.concat([gpd.read_file(u['url']) for u in layer['urls']], ignore_index=True)
+
+		# Step 2: Print columns
+		for name, gdf in [('Drought', drought_gdf), ('Cropping', crop_gdf), ('Terrain', terrain_gdf), ('LULC', lulc_gdf)]:
+			if gdf is not None:
+				print(f"{{name}} columns ({{len(gdf.columns)}}): {{gdf.columns.tolist()[:15]}}...")
+
+		# Step 3: Drop geometry from all except drought_gdf, then merge on 'uid'
+		merged = drought_gdf.drop(columns=['geometry'])
+		for gdf in [crop_gdf, terrain_gdf, lulc_gdf]:
+			if gdf is not None:
+				cols_to_drop = ['geometry', 'id', 'area_in_ha', 'sum']
+				gdf_clean = gdf.drop(columns=[c for c in cols_to_drop if c in gdf.columns])
+				merged = merged.merge(gdf_clean, on='uid', how='inner', suffixes=('', f'_{{gdf.columns[2][:4]}}'))
+		print(f"Merged shape: {{merged.shape}}")
+
+		# Step 4: Select numeric columns only (exclude id, uid, geometry, etc.)
+		exclude_cols = ['id', 'uid', 'geometry', 'area_in_ha', 'sum', 'terrainClu']
+		feature_cols = [c for c in merged.columns if c not in exclude_cols and merged[c].dtype in ['float64', 'int64', 'float32', 'int32']]
+		print(f"Feature columns ({{len(feature_cols)}}): {{feature_cols[:20]}}...")
+
+		# Step 5: Build feature matrix and normalize
+		import numpy as np
+		from sklearn.preprocessing import StandardScaler
+		from sklearn.metrics.pairwise import cosine_similarity
+
+		X = merged[feature_cols].fillna(0).values
+		scaler = StandardScaler()
+		X_scaled = scaler.fit_transform(X)
+
+		# Step 6: Find the target MWS by uid
+		target_uid = '18_16157'  # Replace with the uid from the query
+		target_idx = merged.index[merged['uid'] == target_uid]
+		if len(target_idx) == 0:
+			print(f"Target uid {{target_uid}} not found! Available uids: {{merged['uid'].tolist()[:10]}}")
+		else:
+			target_idx = target_idx[0]
+			target_vec = X_scaled[target_idx].reshape(1, -1)
+
+			# Step 7: Cosine similarity between target and all
+			sims = cosine_similarity(target_vec, X_scaled)[0]
+			merged['similarity'] = sims
+
+			# Exclude the target itself, sort descending
+			others = merged[merged['uid'] != target_uid].sort_values('similarity', ascending=False)
+			top_n = 10
+			top = others.head(top_n)[['uid', 'similarity']]
+			print(f"Top {{top_n}} most similar MWS to {{target_uid}}:")
+			print(top.to_string())
+
+			# Step 8: Export GeoJSON with geometries — CLEAN output
+			top_uids = top['uid'].tolist()
+			top_gdf = drought_gdf[drought_gdf['uid'].isin(top_uids + [target_uid])].copy()
+			top_gdf = top_gdf.merge(merged[['uid', 'similarity']], on='uid', how='left')
+			# Drop GeoServer 'id' column (e.g. dharwad_navalgund_drought.17) — it is NOT the MWS uid
+			if 'id' in top_gdf.columns:
+				top_gdf = top_gdf.drop(columns=['id'])
+			# Keep only key summary columns + similarity + geometry (drop raw weekly rd/drlb columns)
+			keep_cols = ['uid', 'similarity', 'area_in_ha', 'avg_dryspell', 'geometry']
+			# Also keep yearly summary columns (drysp_, w_sev_, w_mod_, w_mld_, cropping_intensity_, hill_slope, etc.)
+			for c in top_gdf.columns:
+				if any(c.startswith(p) for p in ['drysp_', 'w_sev_', 'w_mod_', 'w_mld_', 'cropping_intensity', 'hill_slope', 'plain_area', 'ridge_area', 'slopy_area', 'valley_are']):
+					keep_cols.append(c)
+			keep_cols = [c for c in keep_cols if c in top_gdf.columns]
+			top_gdf = top_gdf[keep_cols]
+			top_gdf.to_file('./exports/similar_microwatersheds.geojson', driver='GeoJSON')
+
 	elif data['success'] and data['data_type'] == 'timeseries':
 		# Access timeseries data
 		timeseries = data['timeseries_data']
@@ -1274,17 +1555,34 @@ if __name__ == "__main__":
 	# print("="*70)
 	# run_hybrid_agent("Can you show me areas that have lost tree cover in Navalgund, Dharwad, Karnataka since 2018? also hectares of degraded area?")
 
-	print("Running query #6 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
-	print("="*70)
-	run_hybrid_agent("find all microwatersheds in Navalgund tehsil, Dharwad district in Karnataka, with highest cropping senstivity to drought")
+    # print("Running query #4 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+	# print("="*70)
+	# run_hybrid_agent("How much cropland in Navalgund, Dharwad, Karnataka has turned into built up since 2018? can you show me those regions?")
 
     # print("Running query #5 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
 	# print("="*70)
 	# run_hybrid_agent("Which villages in Navalgund, Dharwad Karnataka among the ones available on Core Stack have experienced droughts? ")
 
-	# print("Running query #4 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+	# print("Running query #6 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
 	# print("="*70)
-	# run_hybrid_agent("How much cropland in Navalgund, Dharwad, Karnataka has turned into built up since 2018? can you show me those regions?")
-	# print("Running query #4 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+	# run_hybrid_agent("find all microwatersheds in Navalgund tehsil, Dharwad district in Karnataka, with highest cropping senstivity to drought")
+
+	# print("Running query #7 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
 	# print("="*70)
-	# run_hybrid_agent("How much cropland in Navalgund, Dharwad, Karnataka has turned into built up since 2018? can you show me those regions?")
+	# run_hybrid_agent("find all microwatersheds in Navalgund tehsil, Dharwad district in Karnataka, with highest surface water availability senstivity to drought")
+
+
+	print("Running query #8 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+	print("="*70)
+	run_hybrid_agent("find me microwatersheds in Navalgund tehsil, Dharwad district, Karnataka most similar to 18_16157 uid microwatershed, based on its terrain, drought frequency, LULC and cropping intensity")
+
+
+	# print("Running query #7 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+	# print("="*70)
+	# run_hybrid_agent("find all microwatersheds in Navalgund tehsil, Dharwad district in Karnataka, with highest surface water availability senstivity to drought")
+
+
+	# print("Running query #7 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+	# print("="*70)
+	# run_hybrid_agent("find all microwatersheds in Navalgund tehsil, Dharwad district in Karnataka, with highest surface water availability senstivity to drought")
+
