@@ -982,6 +982,60 @@ CORRECT METHODOLOGY (Propensity Score Matching):
 
 ═══════════════════════════════════════════════════════════════════════════════
 
+═══════════════════════════════════════════════════════════════════════════════
+
+**Query Type 10: "Rank previously identified top-K MWS by cropping intensity AND surface water availability"**
+This query takes MWS UIDs from PREVIOUSLY exported GeoJSON files (from earlier prompts 5/6/7) and
+ranks them by two weighted composite scores:
+
+✅ TWO PAST EXPORTS ARE USED:
+- `./exports/top_drought_sensitive_microwatersheds.geojson` → UIDs for **cropping intensity ranking**
+- `./exports/top_sw_sensitive_microwatersheds.geojson` → UIDs for **surface water ranking**
+
+✅ TWO DATA LAYERS NEEDED (fetched from CoreStack):
+- **LULC vector** → has per-MWS columns: `triply_cro/triply_c_1..7`, `doubly_cro/doubly_c_1..7`,
+  `single_kha/single_k_1..7`, `single_non/single_n_1..7` (cropping areas by year)
+  AND `krz_water_/krz_wate_1..7` (perennial), `kr_water_a/kr_water_1..7` (winter), `k_water_ar/k_water__1..7` (monsoon)
+- **Surface Water Bodies vector** → has per-waterbody columns: `krz_YY-YY` (perennial), `kr_YY-YY` (winter), `k_YY-YY` (monsoon)
+  Linked to MWS via `MWS_UID` column. Aggregate by `MWS_UID` using sum.
+
+🔴 MANDATORY: For this query type, COPY the code from EXAMPLE 8 below almost verbatim.
+
+**WEIGHTED SCORE FORMULAS:**
+
+1. **Cropping Intensity Score** (per MWS, averaged across years):
+   `ci_score = 3 * avg(triply_cropped_area) + 2 * avg(doubly_cropped_area) + 1 * avg(single_kharif + single_non_kharif)`
+   - Use LULC vector columns: triply_cro..triply_c_7 (8 years), doubly_cro..doubly_c_7, single_kha..single_k_7, single_non..single_n_7
+   - Each suffix _1 through _7 represents years 2018-2024 (base col = 2017)
+   - Average across all years, then apply weights
+
+2. **Surface Water Availability Score** (per MWS, averaged across years):
+   `sw_score = 3 * avg(perennial_water_area) + 2 * avg(winter_water_area) + 1 * avg(monsoon_water_area)`
+   - Use LULC vector columns: krz_water_/krz_wate_1..7 (perennial), kr_water_a/kr_water_1..7 (winter), k_water_ar/k_water__1..7 (monsoon)
+   - OR from Surface Water Bodies layer: aggregate `krz_YY-YY`, `kr_YY-YY`, `k_YY-YY` by MWS_UID
+   - Average across all years, then apply weights
+
+⚠️ CRITICAL LULC COLUMN NAME PATTERN:
+LULC vector columns are TRUNCATED. The naming pattern for 8 yearly values (2017-2024) is:
+- Base col (2017): `triply_cro`, `doubly_cro`, `single_kha`, `single_non`, `krz_water_`, `kr_water_a`, `k_water_ar`
+- Subsequent (2018-2024): `triply_c_1` through `triply_c_7`, `doubly_c_1`..`doubly_c_7`, etc.
+
+CORRECT METHODOLOGY:
+1. Read `./exports/top_drought_sensitive_microwatersheds.geojson` → extract UIDs for crop ranking
+2. Read `./exports/top_sw_sensitive_microwatersheds.geojson` → extract UIDs for water ranking
+3. Call fetch_corestack_data ONCE to get LULC vector layer
+4. Filter LULC to only the UIDs from both exports (union of UIDs)
+5. Compute cropping intensity score per MWS using LULC triple/double/single crop columns
+6. Compute surface water score per MWS using LULC krz/kr/k water columns
+7. Rank drought-sensitive MWS by cropping intensity score (descending)
+8. Rank sw-sensitive MWS by surface water score (descending)
+9. Print BOTH rankings with uid + score
+10. Export combined results as GeoJSON with both scores
+
+⚠️ LOCATION: ALWAYS include location in fetch_corestack_data call.
+
+═══════════════════════════════════════════════════════════════════════════════
+
 Instructions:
 1. **CORESTACK PRIORITY (PRIMARY)**: For ANY query about India or Indian locations, you MUST call fetch_corestack_data FIRST to access CoreStack database. Available CoreStack layers:
    - Raster: {', '.join(CORESTACK_DATA_PRODUCTS['raster_layers'])}
@@ -1526,6 +1580,99 @@ For multi-region layers: Read ALL URLs, concat GeoDataFrames, then analyze.
 			top_gdf = top_gdf[keep_cols]
 			top_gdf.to_file('./exports/psm_matched_microwatersheds.geojson', driver='GeoJSON')
 
+		# ╔══════════════════════════════════════════════════════════════╗
+		# ║ EXAMPLE 8: RANK TOP-K MWS BY CROPPING INTENSITY & WATER    ║
+		# ║ ⚠️ For Query Type 10, COPY THIS CODE ALMOST VERBATIM.        ║
+		# ║ Reads past exports, fetches LULC, computes weighted scores  ║
+		# ╚══════════════════════════════════════════════════════════════╝
+		import os, glob
+		# Step 1: Read UIDs from past exports
+		drought_sens_path = './exports/top_drought_sensitive_microwatersheds.geojson'
+		sw_sens_path = './exports/top_sw_sensitive_microwatersheds.geojson'
+
+		drought_sens_gdf = gpd.read_file(drought_sens_path)
+		sw_sens_gdf = gpd.read_file(sw_sens_path)
+		drought_uids = drought_sens_gdf['uid'].tolist()
+		sw_uids = sw_sens_gdf['uid'].tolist()
+		all_uids = list(set(drought_uids + sw_uids))
+		print(f"Drought-sensitive UIDs ({{len(drought_uids)}}): {{drought_uids}}")
+		print(f"SW-sensitive UIDs ({{len(sw_uids)}}): {{sw_uids}}")
+
+		# Step 2: Fetch LULC vector layer from CoreStack
+		data = fetch_corestack_data(query="Navalgund Dharwad Karnataka LULC vector data")
+		vector_layers = data['spatial_data']['vector_layers']
+
+		print("Available vector layers:")
+		for layer in vector_layers:
+			print(f"  - {{layer['layer_name']}}")
+
+		# Step 3: Load LULC vector
+		lulc_gdf = None
+		for layer in vector_layers:
+			lname = layer['layer_name'].lower()
+			if 'lulc' in lname and 'terrain' not in lname and 'level' not in lname and lulc_gdf is None:
+				print(f"Found LULC layer: {{layer['layer_name']}}")
+				lulc_gdf = pd.concat([gpd.read_file(u['url']) for u in layer['urls']], ignore_index=True)
+
+		print(f"LULC shape: {{lulc_gdf.shape}}")
+		print(f"LULC columns: {{lulc_gdf.columns.tolist()}}")
+
+		# Step 4: Filter to only relevant UIDs
+		lulc_filtered = lulc_gdf[lulc_gdf['uid'].isin(all_uids)].copy()
+		print(f"Filtered LULC to {{len(lulc_filtered)}} MWS")
+
+		# Step 5: Compute CROPPING INTENSITY weighted score
+		# triply_cro, triply_c_1..triply_c_7 (2017-2024)
+		# doubly_cro, doubly_c_1..doubly_c_7
+		# single_kha, single_k_1..single_k_7 + single_non, single_n_1..single_n_7
+		triple_cols = ['triply_cro'] + [f'triply_c_{{i}}' for i in range(1, 8)]
+		double_cols = ['doubly_cro'] + [f'doubly_c_{{i}}' for i in range(1, 8)]
+		single_k_cols = ['single_kha'] + [f'single_k_{{i}}' for i in range(1, 8)]
+		single_nk_cols = ['single_non'] + [f'single_n_{{i}}' for i in range(1, 8)]
+
+		lulc_filtered['avg_triple'] = lulc_filtered[triple_cols].mean(axis=1)
+		lulc_filtered['avg_double'] = lulc_filtered[double_cols].mean(axis=1)
+		lulc_filtered['avg_single'] = lulc_filtered[single_k_cols].mean(axis=1) + lulc_filtered[single_nk_cols].mean(axis=1)
+		lulc_filtered['ci_score'] = 3 * lulc_filtered['avg_triple'] + 2 * lulc_filtered['avg_double'] + 1 * lulc_filtered['avg_single']
+		print(f"Cropping intensity scores computed")
+
+		# Step 6: Compute SURFACE WATER weighted score
+		# krz_water_, krz_wate_1..krz_wate_7 (perennial)
+		# kr_water_a, kr_water_1..kr_water_7 (winter)
+		# k_water_ar, k_water__1..k_water__7 (monsoon)
+		krz_cols = ['krz_water_'] + [f'krz_wate_{{i}}' for i in range(1, 8)]
+		kr_cols = ['kr_water_a'] + [f'kr_water_{{i}}' for i in range(1, 8)]
+		k_cols = ['k_water_ar'] + [f'k_water__{{i}}' for i in range(1, 8)]
+
+		lulc_filtered['avg_perennial'] = lulc_filtered[krz_cols].mean(axis=1)
+		lulc_filtered['avg_winter'] = lulc_filtered[kr_cols].mean(axis=1)
+		lulc_filtered['avg_monsoon'] = lulc_filtered[k_cols].mean(axis=1)
+		lulc_filtered['sw_score'] = 3 * lulc_filtered['avg_perennial'] + 2 * lulc_filtered['avg_winter'] + 1 * lulc_filtered['avg_monsoon']
+		print(f"Surface water scores computed")
+
+		# Step 7: Rank drought-sensitive MWS by cropping intensity score
+		drought_ranked = lulc_filtered[lulc_filtered['uid'].isin(drought_uids)][['uid', 'ci_score', 'avg_triple', 'avg_double', 'avg_single']].sort_values('ci_score', ascending=False).reset_index(drop=True)
+		drought_ranked.index = drought_ranked.index + 1  # 1-based rank
+		drought_ranked.index.name = 'rank'
+		print(f"\nDrought-sensitive MWS ranked by Cropping Intensity Score:")
+		print(f"Formula: ci_score = 3*triple + 2*double + 1*(single_kharif + single_non_kharif)")
+		print(drought_ranked.to_string())
+
+		# Step 8: Rank sw-sensitive MWS by surface water score
+		sw_ranked = lulc_filtered[lulc_filtered['uid'].isin(sw_uids)][['uid', 'sw_score', 'avg_perennial', 'avg_winter', 'avg_monsoon']].sort_values('sw_score', ascending=False).reset_index(drop=True)
+		sw_ranked.index = sw_ranked.index + 1
+		sw_ranked.index.name = 'rank'
+		print(f"\nSW-sensitive MWS ranked by Surface Water Availability Score:")
+		print(f"Formula: sw_score = 3*perennial + 2*winter + 1*monsoon")
+		print(sw_ranked.to_string())
+
+		# Step 9: Export combined results as GeoJSON
+		export_gdf = lulc_filtered[lulc_filtered['uid'].isin(all_uids)].copy()
+		export_gdf = export_gdf[['uid', 'ci_score', 'sw_score', 'avg_triple', 'avg_double', 'avg_single', 'avg_perennial', 'avg_winter', 'avg_monsoon', 'geometry']]
+		export_gdf['is_drought_sensitive'] = export_gdf['uid'].isin(drought_uids)
+		export_gdf['is_sw_sensitive'] = export_gdf['uid'].isin(sw_uids)
+		export_gdf.to_file('./exports/ranked_mws_by_ci_and_sw.geojson', driver='GeoJSON')
+
 	elif data['success'] and data['data_type'] == 'timeseries':
 		# Access timeseries data
 		timeseries = data['timeseries_data']
@@ -1730,12 +1877,20 @@ if __name__ == "__main__":
 	# run_hybrid_agent("find me microwatersheds in Navalgund tehsil, Dharwad district, Karnataka most similar to 18_16157 uid microwatershed, based on its terrain, drought frequency, LULC and cropping intensity")
 
 
-	print("Running query #9 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+	# print("Running query #9 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+	# print("="*70)
+	# run_hybrid_agent("find me microwatersheds most similar to 18_16157 id microwatershed in Navalgund, Dharwad, Karnataka, based on its terrain, drought frequency, and LULC using propensity score matching")
+
+
+	print("Running query #10 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
 	print("="*70)
-	run_hybrid_agent("find me microwatersheds most similar to 18_16157 id microwatershed in Navalgund, Dharwad, Karnataka, based on its terrain, drought frequency, and LULC using propensity score matching")
+	run_hybrid_agent("From the top-K earlier identified drought-sensitive and surface-water-sensitive microwatersheds in Navalgund, Dharwad, Karnataka, rank them based on their cropping intensity and surface water availability. Use weighted score: cropping_score = 3*triple_crop + 2*double_crop + 1*(single_kharif + single_non_kharif). Water score = 3*perennial_water + 2*winter_water + 1*monsoon_water. Read past exports from ./exports/ to get the MWS UIDs.")
 
+    # print("Running query #7 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+	# print("="*70)
+	# run_hybrid_agent("find all microwatersheds in Navalgund tehsil, Dharwad district in Karnataka, with highest surface water availability senstivity to drought")
 
-	# print("Running query #7 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+    # print("Running query #7 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
 	# print("="*70)
 	# run_hybrid_agent("find all microwatersheds in Navalgund tehsil, Dharwad district in Karnataka, with highest surface water availability senstivity to drought")
 
