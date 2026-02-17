@@ -1036,6 +1036,54 @@ CORRECT METHODOLOGY:
 
 ═══════════════════════════════════════════════════════════════════════════════
 
+═══════════════════════════════════════════════════════════════════════════════
+
+**Query Type 11: "Compare SC/ST% population of villages against number of NREGA works — scatter plot"**
+This query compares the scheduled caste/tribe population percentage of each village
+with the number of NREGA (MGNREGA) works done in that village, visualized as a scatter plot.
+
+✅ TWO DATA LAYERS NEEDED (fetched from CoreStack in a SINGLE call):
+- **Admin Boundary vector** → has per-village census columns:
+  `P_SC` (total SC population), `P_ST` (total ST population), `TOT_P` (total population),
+  `vill_name` (village name). 138 polygons, one per village boundary.
+- **NREGA Assets vector** → has per-work point features (10,797 works):
+  `Gram_panch` (Gram Panchayat name), `Panchayat` (village), `Work Name`, `Work Type`,
+  `WorkCatego` (work category), `Total_Expe` (expenditure), `geometry` (point location).
+
+🔴 MANDATORY: For this query type, COPY the code from EXAMPLE 9 below almost verbatim.
+
+**METHODOLOGY:**
+1. Call fetch_corestack_data ONCE → get vector_layers list
+2. Print ALL layer names to find Admin Boundary and NREGA Assets layers
+3. Find Admin Boundary layer: match `'admin' in layer_name.lower()` or `'panchayat' in layer_name.lower()`
+4. Find NREGA Assets layer: match `'nrega' in layer_name.lower()`
+5. Load both as GeoDataFrames
+6. Aggregate Admin Boundary by `vill_name`: sum `P_SC`, `P_ST`, `TOT_P` per village
+   Compute `sc_st_pct = (P_SC + P_ST) / TOT_P * 100`. Drop villages with TOT_P == 0.
+7. Dissolve admin polygons by `vill_name` to get one polygon per village
+8. Spatial join: assign each NREGA work (point) to its containing admin village polygon
+   Use `gpd.sjoin(nrega_gdf, admin_dissolved[['vill_name', 'geometry']], how='left', predicate='within')`
+9. Count NREGA works per village: `joined.groupby('vill_name').size()`
+10. Merge SC/ST% with NREGA count on `vill_name`
+11. Build scatter plot:
+    - X-axis: SC/ST population % (per village)
+    - Y-axis: Number of NREGA works
+    - Annotate each point with village name
+    - Add trend line (linear regression fit)
+    - Add correlation coefficient (Pearson r) in the title or annotation
+    - Export as PNG to `./exports/scst_vs_nrega_scatter.png`
+12. Also export merged data as GeoJSON with village polygons + sc_st_pct + nrega_count
+
+⚠️ IMPORTANT NOTES:
+- Admin Boundary and NREGA Assets both appear as `dharwad_navalgund` in layer_name but with different dataset_name.
+  Use the dataset_name or the layer URL to distinguish them.
+- NREGA works are POINT geometries; Admin Boundary are POLYGON geometries.
+- Some admin villages may have zero NREGA works (they won't appear in the spatial join).
+- Use `matplotlib.pyplot` for the scatter plot. Label outlier points with village name.
+- ⚠️ LOCATION: ALWAYS include location in fetch_corestack_data call.
+
+═══════════════════════════════════════════════════════════════════════════════
+
 Instructions:
 1. **CORESTACK PRIORITY (PRIMARY)**: For ANY query about India or Indian locations, you MUST call fetch_corestack_data FIRST to access CoreStack database. Available CoreStack layers:
    - Raster: {', '.join(CORESTACK_DATA_PRODUCTS['raster_layers'])}
@@ -1673,6 +1721,97 @@ For multi-region layers: Read ALL URLs, concat GeoDataFrames, then analyze.
 		export_gdf['is_sw_sensitive'] = export_gdf['uid'].isin(sw_uids)
 		export_gdf.to_file('./exports/ranked_mws_by_ci_and_sw.geojson', driver='GeoJSON')
 
+		# ╔══════════════════════════════════════════════════════════════╗
+		# ║ EXAMPLE 9: SC/ST% vs NREGA WORKS SCATTER PLOT              ║
+		# ║ ⚠️ For Query Type 11, COPY THIS CODE ALMOST VERBATIM.        ║
+		# ║ Loads Admin Boundary + NREGA, spatial joins, scatter plot   ║
+		# ╚══════════════════════════════════════════════════════════════╝
+		import os
+		os.makedirs('./exports', exist_ok=True)
+
+		# Step 1: Fetch data from CoreStack
+		data = fetch_corestack_data(query="Navalgund Dharwad Karnataka NREGA admin boundary villages")
+		vector_layers = data['spatial_data']['vector_layers']
+
+		print("Available vector layers:")
+		for layer in vector_layers:
+			print(f"  - {{layer['layer_name']}}")
+
+		# Step 2: Load Admin Boundary and NREGA layers
+		admin_gdf = None
+		nrega_gdf = None
+		for layer in vector_layers:
+			lname = layer['layer_name'].lower()
+			# Admin Boundary: has 'admin' or 'panchayat' in name
+			if ('admin' in lname or 'panchayat' in lname) and admin_gdf is None:
+				print(f"Found Admin layer: {{layer['layer_name']}}")
+				admin_gdf = pd.concat([gpd.read_file(u['url']) for u in layer['urls']], ignore_index=True)
+			# NREGA Assets: has 'nrega' in name
+			if 'nrega' in lname and nrega_gdf is None:
+				print(f"Found NREGA layer: {{layer['layer_name']}}")
+				nrega_gdf = pd.concat([gpd.read_file(u['url']) for u in layer['urls']], ignore_index=True)
+
+		print(f"Admin shape: {{admin_gdf.shape}}, columns: {{admin_gdf.columns.tolist()}}")
+		print(f"NREGA shape: {{nrega_gdf.shape}}, columns: {{nrega_gdf.columns.tolist()}}")
+
+		# Step 3: Aggregate Admin boundary by village
+		# Sum P_SC, P_ST, TOT_P per village, compute SC/ST%
+		admin_stats = admin_gdf.groupby('vill_name').agg({{'P_SC': 'sum', 'P_ST': 'sum', 'TOT_P': 'sum'}}).reset_index()
+		admin_stats = admin_stats[admin_stats['TOT_P'] > 0].copy()
+		admin_stats['sc_st_pct'] = (admin_stats['P_SC'] + admin_stats['P_ST']) / admin_stats['TOT_P'] * 100
+		print(f"Villages with population data: {{len(admin_stats)}}")
+
+		# Step 4: Dissolve admin polygons by village name (one polygon per village)
+		admin_dissolved = admin_gdf.dissolve(by='vill_name').reset_index()
+
+		# Step 5: Spatial join — assign each NREGA work (point) to its village polygon
+		nrega_gdf = nrega_gdf.to_crs(admin_dissolved.crs)
+		joined = gpd.sjoin(nrega_gdf[['geometry']], admin_dissolved[['vill_name', 'geometry']], how='left', predicate='within')
+		works_per_village = joined.groupby('vill_name').size().reset_index(name='nrega_count')
+		print(f"Villages with NREGA works: {{len(works_per_village)}}")
+
+		# Step 6: Merge SC/ST% with NREGA count
+		merged = admin_stats.merge(works_per_village, on='vill_name', how='inner')
+		print(f"Merged villages: {{len(merged)}}")
+		print(merged[['vill_name', 'sc_st_pct', 'nrega_count']].sort_values('nrega_count', ascending=False).to_string())
+
+		# Step 7: Build scatter plot
+		import matplotlib
+		matplotlib.use('Agg')
+		import matplotlib.pyplot as plt
+		import numpy as np
+		from scipy import stats
+
+		fig, ax = plt.subplots(figsize=(14, 10))
+		ax.scatter(merged['sc_st_pct'], merged['nrega_count'], s=80, alpha=0.7, edgecolors='black', linewidth=0.5, c='steelblue')
+
+		# Annotate each point with village name
+		for _, row in merged.iterrows():
+			ax.annotate(row['vill_name'], (row['sc_st_pct'], row['nrega_count']),
+						fontsize=6, alpha=0.75, ha='left', va='bottom',
+						xytext=(4, 4), textcoords='offset points')
+
+		# Add trend line
+		slope, intercept, r_value, p_value, std_err = stats.linregress(merged['sc_st_pct'], merged['nrega_count'])
+		x_line = np.linspace(merged['sc_st_pct'].min(), merged['sc_st_pct'].max(), 100)
+		ax.plot(x_line, slope * x_line + intercept, 'r--', linewidth=1.5, label=f'Trend (r={{r_value:.3f}}, p={{p_value:.3f}})')
+
+		ax.set_xlabel('SC/ST Population (%)', fontsize=12)
+		ax.set_ylabel('Number of NREGA Works', fontsize=12)
+		ax.set_title(f'SC/ST Population % vs NREGA Works per Village\nNavalgund, Dharwad, Karnataka (Pearson r={{r_value:.3f}})', fontsize=13)
+		ax.legend(fontsize=10)
+		ax.grid(True, alpha=0.3)
+		plt.tight_layout()
+		plt.savefig('./exports/scst_vs_nrega_scatter.png', dpi=200, bbox_inches='tight')
+		print(f"Scatter plot saved to ./exports/scst_vs_nrega_scatter.png")
+
+		# Step 8: Export merged data as GeoJSON
+		export_gdf = admin_dissolved[admin_dissolved['vill_name'].isin(merged['vill_name'])].copy()
+		export_gdf = export_gdf[['vill_name', 'geometry']].merge(merged[['vill_name', 'sc_st_pct', 'nrega_count', 'P_SC', 'P_ST', 'TOT_P']], on='vill_name')
+		export_gdf = gpd.GeoDataFrame(export_gdf, geometry='geometry')
+		export_gdf.to_file('./exports/scst_vs_nrega_villages.geojson', driver='GeoJSON')
+		print(f"GeoJSON exported to ./exports/scst_vs_nrega_villages.geojson")
+
 	elif data['success'] and data['data_type'] == 'timeseries':
 		# Access timeseries data
 		timeseries = data['timeseries_data']
@@ -1882,9 +2021,13 @@ if __name__ == "__main__":
 	# run_hybrid_agent("find me microwatersheds most similar to 18_16157 id microwatershed in Navalgund, Dharwad, Karnataka, based on its terrain, drought frequency, and LULC using propensity score matching")
 
 
-	print("Running query #10 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+	# print("Running query #10 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+	# print("="*70)
+	# run_hybrid_agent("From the top-K earlier identified drought-sensitive and surface-water-sensitive microwatersheds in Navalgund, Dharwad, Karnataka, rank them based on their cropping intensity and surface water availability. Use weighted score: cropping_score = 3*triple_crop + 2*double_crop + 1*(single_kharif + single_non_kharif). Water score = 3*perennial_water + 2*winter_water + 1*monsoon_water. Read past exports from ./exports/ to get the MWS UIDs.")
+
+	print("Running query #11 from CSV (Navalgund, Dharwad, Karnataka)...")
 	print("="*70)
-	run_hybrid_agent("From the top-K earlier identified drought-sensitive and surface-water-sensitive microwatersheds in Navalgund, Dharwad, Karnataka, rank them based on their cropping intensity and surface water availability. Use weighted score: cropping_score = 3*triple_crop + 2*double_crop + 1*(single_kharif + single_non_kharif). Water score = 3*perennial_water + 2*winter_water + 1*monsoon_water. Read past exports from ./exports/ to get the MWS UIDs.")
+	run_hybrid_agent("In my Navalgund tehsil of Dharwad, Karnataka, compare the SC/ST% population of villages against the number of NREGA works done in the villages. Build a scatter plot.")
 
     # print("Running query #7 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
 	# print("="*70)
