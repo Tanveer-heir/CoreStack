@@ -1,1 +1,5 @@
 .env
+venv/
+Resources/
+__pycache__/
+layers.txt
