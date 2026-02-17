@@ -1052,10 +1052,21 @@ if __name__ == "__main__":
 	Example usage of the hybrid agent with a test query.
 	"""
 
-	print("ARCHITECTURE 4 TEST")
+	print("Bot TEST")
 	print("="*70)
 
-	print("Running query #1 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
-	print("="*70)
+	# print("Running query #1 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+	# print("="*70)
+	# run_hybrid_agent("Could you show how cropping intensity has changed over the years in Navalgund, Dharwad, Karnataka?")
 
-	run_hybrid_agent("Could you show me how average cropping intensity in village Navalgund in Dharwad district, Karnataka has changed over the years?")
+	# print("Running query #2 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+	# print("="*70)
+	# run_hybrid_agent("Could you show how surface water availability has changed over the years in Navalgund, Dharwad, Karnataka?")
+
+	# print("Running query #3 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+	# print("="*70)
+	# run_hybrid_agent("Can you show me areas that have lost tree cover in Navalgund, Dharwad, Karnataka since 2018? also hectares of degraded area?")
+
+	print("Running query #4 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+	print("="*70)
+	run_hybrid_agent("How much cropland in Navalgund, Dharwad, Karnataka has turned into built up since 2018? can you show me those regions?")
