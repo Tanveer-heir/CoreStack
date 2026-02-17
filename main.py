@@ -769,6 +769,58 @@ WHY LULC COMPARISON?
 - LULC comparison gives you FULL CONTROL over time period and class transitions
 - You get BOTH area statistics AND a spatial change map
 
+**Query Type 5: "Microwatersheds with highest cropping sensitivity to drought"**
+✅ CORRECT LAYERS: drought layer + cropping intensity layer (both spatial vectors from SAME fetch)
+⛔ NEVER use np.corrcoef on w_sev columns (they are mostly zero → NaN correlation)
+⛔ NEVER invent column names like 'mws_id_source', 'mws_id', 'watershed_id' — they DO NOT EXIST
+
+🔴 MANDATORY: For this query type, COPY the code from EXAMPLE 4 below almost verbatim.
+   The ONLY column to group by after sjoin is `id_drought` (the drought GDF's `id` column with lsuffix).
+   The sjoin MUST use: `lsuffix='drought', rsuffix='crop'`
+   After sjoin, print columns: `print(joined.columns.tolist())` to verify.
+
+⚠️ CRITICAL LAYER NAME MATCHING:
+- The drought layer name is `"Drought (dharwad_navalgund_drought)"` — match with `'drought' in name.lower()`
+- The cropping layer name is `"Cropping Intensity (dharwad_navalgund_intensity)"` — match with `'cropping' in name.lower() and 'intensity' in name.lower()`
+- ALWAYS print ALL vector layer names FIRST: `for l in vector_layers: print(l['layer_name'])`
+- DO NOT look for exact strings like 'drought_frequency' — the API returns different names
+
+DROUGHT DATA COLUMN REFERENCE:
+- `w_sev_YYYY`: Weeks of SEVERE drought in year YYYY (integer, often 0)
+- `w_mod_YYYY`: Weeks of MODERATE drought
+- `w_mld_YYYY`: Weeks of MILD drought
+- `w_no_YYYY`: Weeks of NO drought
+- `drysp_YYYY`: Dry spell length in weeks
+- `avg_dryspell`: Average dry spell across years
+- `t_wks_YYYY`: Total weeks in season for year YYYY
+
+CROPPING DATA COLUMN REFERENCE:
+- `cropping_intensity_YYYY`: Cropping intensity value for year YYYY (2017-2024)
+
+CORRECT METHODOLOGY (drought-cropping sensitivity analysis):
+1. Call fetch_corestack_data ONCE → get vector_layers list
+2. Print ALL layer names: `for l in vector_layers: print(l['layer_name'])`
+3. Find drought layer: `'drought' in layer['layer_name'].lower()` (NOT 'drought_frequency')
+4. Find cropping layer: `'cropping' in layer['layer_name'].lower() and 'intensity' in layer['layer_name'].lower()`
+5. Load both as GeoDataFrames
+6. Spatial join drought_gdf with cropping_gdf (inner join, intersects)
+7. For EACH microwatershed (group by drought MWS id):
+   a) Classify each year (2017-2022) as DROUGHT or NON-DROUGHT:
+      - A year is a DROUGHT YEAR if `drysp_YYYY > 0` OR `w_sev_YYYY + w_mod_YYYY + w_mld_YYYY > 0`
+      - Otherwise it is a NON-DROUGHT YEAR
+   b) Compute mean cropping intensity across DROUGHT years
+   c) Compute mean cropping intensity across NON-DROUGHT years
+   d) sensitivity_score = mean_non_drought - mean_drought (positive = drop during drought)
+8. Rank microwatersheds by sensitivity_score DESCENDING (highest drop = most sensitive)
+9. Take top N, export as GeoJSON with sensitivity scores
+10. ALSO resolve to village names using admin_boundaries_vector spatial join with vill_name column
+
+WHY THIS APPROACH?
+- w_sev columns are mostly 0 (severe drought is rare) → correlation fails with NaN
+- drysp (dry spell) columns are more reliable indicators of drought occurrence
+- Comparing mean cropping intensity between drought vs non-drought years gives a clear sensitivity signal
+- Positive difference means cropping drops during drought = high sensitivity
+
 ═══════════════════════════════════════════════════════════════════════════════
 
 Instructions:
@@ -776,6 +828,15 @@ Instructions:
    - Raster: {', '.join(CORESTACK_DATA_PRODUCTS['raster_layers'])}
    - Vector: {', '.join(CORESTACK_DATA_PRODUCTS['vector_layers'])}
    - Timeseries: {', '.join(CORESTACK_DATA_PRODUCTS['timeseries_metrics'])}
+
+⚠️ CRITICAL: LAYER NAME MATCHING
+Layer names from the API are formatted as "Dataset Name (raw_layer_name)". Examples:
+   - Drought layer → `"Drought (dharwad_navalgund_drought)"`
+   - Cropping Intensity → `"Cropping Intensity (dharwad_navalgund_intensity)"`
+   - Admin Boundaries → `"Admin Boundaries (admin_boundaries_dharwad_navalgund)"`
+ALWAYS use case-insensitive SUBSTRING matching: `'drought' in layer['layer_name'].lower()`
+NEVER look for exact names like "drought_frequency_vector" — those are internal IDs, not API names.
+FIRST STEP after fetching: Print all layer names: `for l in vector_layers: print(l['layer_name'])`
 
 **IMPORTANT: PRE-COMPUTED CHANGE DETECTION LAYERS (2017-2022)**
 
@@ -816,9 +877,11 @@ g) **surface_water_bodies_vector**: Water bodies with temporal attributes
    - Has seasonal availability and area over years
    - Use for: "surface water over years", "water availability trends"
 
-h) **drought_frequency_vector**: Drought severity mapping
-   - Use for: "drought affected areas", "drought frequency"
-   - ⚠️ CRITICAL: You MUST call fetch_corestack_data ONCE and use BOTH drought + admin layers from the SAME response.
+h) **drought layer** (also known as drought_frequency_vector): Drought severity mapping
+   - ⚠️ The ACTUAL layer name from the API is `"Drought (dharwad_navalgund_drought)"` — NOT "drought_frequency"
+   - Match with: `'drought' in layer['layer_name'].lower()` (case-insensitive substring match)
+   - Use for: "drought affected areas", "drought frequency", "drought sensitivity"
+   - ⚠️ CRITICAL: You MUST call fetch_corestack_data ONCE and use ALL needed layers from the SAME response.
    - The response already contains ALL layers (29+ vectors). Do NOT call fetch_corestack_data twice.
    - Workflow (follow EXAMPLE 3 in the code examples below):
      1. Call fetch_corestack_data ONCE → get vector_layers list
@@ -958,6 +1021,76 @@ For multi-region layers: Read ALL URLs, concat GeoDataFrames, then analyze.
 			# Step 6: Dissolve by village for export GeoJSON
 			village_dissolved = joined.dissolve(by=village_col, aggfunc='first').reset_index()
 			village_dissolved.to_file('./exports/drought_affected_villages.geojson', driver='GeoJSON')
+
+		# ╔══════════════════════════════════════════════════════════════╗
+		# ║ EXAMPLE 4: DROUGHT-CROPPING SENSITIVITY                      ║
+		# ║ ⚠️ For Query Type 5, COPY THIS CODE ALMOST VERBATIM.         ║
+		# ║ The key column after sjoin is 'id_drought' (NOT mws_id etc.) ║
+		# ╚══════════════════════════════════════════════════════════════╝
+		# FIRST: Print all vector layer names to find the right ones
+		print("Available vector layers:")
+		for layer in vector_layers:
+			print(f"  - {{layer['layer_name']}}")
+
+		# Step 1: Find drought layer (match 'drought' in name) and cropping layer (match 'cropping' + 'intensity')
+		drought_gdf = None
+		crop_gdf = None
+		for layer in vector_layers:
+			if 'drought' in layer['layer_name'].lower() and drought_gdf is None:
+				print(f"Found drought layer: {{layer['layer_name']}}")
+				drought_gdf = pd.concat([gpd.read_file(u['url']) for u in layer['urls']], ignore_index=True).to_crs('EPSG:4326')
+			if 'cropping' in layer['layer_name'].lower() and 'intensity' in layer['layer_name'].lower() and crop_gdf is None:
+				print(f"Found cropping intensity layer: {{layer['layer_name']}}")
+				crop_gdf = pd.concat([gpd.read_file(u['url']) for u in layer['urls']], ignore_index=True).to_crs('EPSG:4326')
+
+		if drought_gdf is not None and crop_gdf is not None:
+			import numpy as np
+			# IMPORTANT: Print columns of both GDFs to understand the data
+			print(f"Drought GDF columns: {{drought_gdf.columns.tolist()}}")
+			print(f"Cropping GDF columns: {{crop_gdf.columns.tolist()}}")
+			print(f"Drought GDF 'id' column sample: {{drought_gdf['id'].head().tolist()}}")
+
+			# Step 2: Spatial join — lsuffix='drought', rsuffix='crop' makes 'id' → 'id_drought'
+			joined = gpd.sjoin(drought_gdf, crop_gdf, how='inner', predicate='intersects', lsuffix='drought', rsuffix='crop')
+			print(f"Joined columns: {{joined.columns.tolist()}}")
+			print(f"Joined shape: {{joined.shape}}")
+
+			# Step 3: Group by 'id_drought' — this IS the MWS identifier
+			# ⚠️ DO NOT use 'mws_id_source', 'mws_id', 'watershed_id' — they do not exist!
+			years = range(2017, 2023)
+			results = []
+			for mws_id, grp in joined.groupby('id_drought'):
+				drought_ci = []
+				non_drought_ci = []
+				for yr in years:
+					drysp_col = f'drysp_{{yr}}'
+					ci_col = f'cropping_intensity_{{yr}}'
+					if drysp_col not in grp.columns or ci_col not in grp.columns:
+						continue
+					drysp_val = grp[drysp_col].mean()
+					ci_val = grp[ci_col].mean()
+					if pd.isna(drysp_val) or pd.isna(ci_val):
+						continue
+					if drysp_val > 0:  # drought year
+						drought_ci.append(ci_val)
+					else:
+						non_drought_ci.append(ci_val)
+				if drought_ci and non_drought_ci:
+					avg_drought = np.mean(drought_ci)
+					avg_non_drought = np.mean(non_drought_ci)
+					sensitivity = avg_non_drought - avg_drought  # positive = drops during drought
+					results.append({{'id': mws_id, 'avg_ci_drought': avg_drought, 'avg_ci_non_drought': avg_non_drought, 'sensitivity_score': sensitivity}})
+
+			# Step 4: Rank by sensitivity (descending = most sensitive first)
+			sens_df = pd.DataFrame(results).sort_values('sensitivity_score', ascending=False)
+			top_n = 10
+			top = sens_df.head(top_n)
+			print(f"Top {{top_n}} most drought-sensitive MWS:\\n{{top}}")
+
+			# Step 5: Export top MWS geometries
+			top_gdf = drought_gdf[drought_gdf['id'].isin(top['id'].tolist())].copy()
+			top_gdf = top_gdf.merge(top[['id', 'sensitivity_score']], on='id')
+			top_gdf.to_file('./exports/top_sensitive_microwatersheds.geojson', driver='GeoJSON')
 
 	elif data['success'] and data['data_type'] == 'timeseries':
 		# Access timeseries data
@@ -1128,9 +1261,6 @@ if __name__ == "__main__":
 	print("Bot TEST")
 	print("="*70)
 
-	print("Running query #5 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
-	print("="*70)
-	run_hybrid_agent("Which villages in Navalgund, Dharwad Karnataka among the ones available on Core Stack have experienced droughts? ")
 
 	# print("Running query #1 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
 	# print("="*70)
@@ -1144,10 +1274,13 @@ if __name__ == "__main__":
 	# print("="*70)
 	# run_hybrid_agent("Can you show me areas that have lost tree cover in Navalgund, Dharwad, Karnataka since 2018? also hectares of degraded area?")
 
-	# print("Running query #4 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
-	# print("="*70)
-	# run_hybrid_agent("How much cropland in Navalgund, Dharwad, Karnataka has turned into built up since 2018? can you show me those regions?")
+	print("Running query #6 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+	print("="*70)
+	run_hybrid_agent("find all microwatersheds in Navalgund tehsil, Dharwad district in Karnataka, with highest cropping senstivity to drought")
 
+    # print("Running query #5 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+	# print("="*70)
+	# run_hybrid_agent("Which villages in Navalgund, Dharwad Karnataka among the ones available on Core Stack have experienced droughts? ")
 
 	# print("Running query #4 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
 	# print("="*70)
