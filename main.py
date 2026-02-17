@@ -2190,13 +2190,15 @@ if __name__ == "__main__":
 	"""
 	Example usage of the hybrid agent with a test query.
 	"""
-
 	print("Bot TEST")
 	print("="*70)
-
-	print("Running query #12 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+	print("Running query #4 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
 	print("="*70)
-	run_hybrid_agent("My tehsil navalgund of Dharwad, Karnataka is quite groundwater stressed. Find the top micro-watersheds that have high cropping intensity as well as a large rainfall runoff volume that can be harvested. Similarly, find those micro-watersheds that have a low cropping intensity but high runoff volume. Essentially build a neat scatterplot split into four quadrants of high/low cropping intensity and high/low runoff")
+	run_hybrid_agent("How much cropland in Navalgund, Dharwad, Karnataka has turned into built up since 2018? can you show me those regions?")
+
+	# print("Running query #12 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+	# print("="*70)
+	# run_hybrid_agent("My tehsil navalgund of Dharwad, Karnataka is quite groundwater stressed. Find the top micro-watersheds that have high cropping intensity as well as a large rainfall runoff volume that can be harvested. Similarly, find those micro-watersheds that have a low cropping intensity but high runoff volume. Essentially build a neat scatterplot split into four quadrants of high/low cropping intensity and high/low runoff")
 
 
 	# print("Running query #1 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
@@ -2211,9 +2213,7 @@ if __name__ == "__main__":
 	# print("="*70)
 	# run_hybrid_agent("Can you show me areas that have lost tree cover in Navalgund, Dharwad, Karnataka since 2018? also hectares of degraded area?")
 
-    # print("Running query #4 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
-	# print("="*70)
-	# run_hybrid_agent("How much cropland in Navalgund, Dharwad, Karnataka has turned into built up since 2018? can you show me those regions?")
+
 
     # print("Running query #5 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
 	# print("="*70)
