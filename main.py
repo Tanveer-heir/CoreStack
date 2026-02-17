@@ -211,6 +211,8 @@ def _corestack_request(endpoint: str, params: Optional[Dict[str, Any]] = None) -
 
 def _fetch_active_locations() -> Dict[str, Any]:
 	payload = _corestack_request("get_active_locations/")
+	print("\n[CoreStack Debug] Active locations payload type:", type(payload).__name__)
+	print("[CoreStack Debug] Active locations payload (truncated):", str(payload)[:1000])
 	return _normalize_active_locations(payload)
 
 
@@ -222,7 +224,25 @@ def _normalize_active_locations(payload: Any) -> Dict[str, Any]:
 		for item in payload:
 			if not isinstance(item, dict):
 				continue
-			state = item.get("state") or item.get("State")
+			state = item.get("state") or item.get("State") or item.get("label")
+			districts = item.get("district") or item.get("District")
+			if state and isinstance(districts, list):
+				for district_item in districts:
+					if not isinstance(district_item, dict):
+						continue
+					district = district_item.get("district") or district_item.get("District") or district_item.get("label")
+					blocks = district_item.get("blocks") or district_item.get("tehsils") or district_item.get("tehsil")
+					if not (state and district and isinstance(blocks, list)):
+						continue
+					state_entry = normalized.setdefault(state, {"districts": {}})
+					district_entry = state_entry["districts"].setdefault(district, {"tehsils": []})
+					for block in blocks:
+						if not isinstance(block, dict):
+							continue
+						tehsil = block.get("tehsil") or block.get("Tehsil") or block.get("label")
+						if tehsil and tehsil not in district_entry["tehsils"]:
+							district_entry["tehsils"].append(tehsil)
+				continue
 			district = item.get("district") or item.get("District")
 			tehsil = item.get("tehsil") or item.get("Tehsil")
 			if not (state and district and tehsil):
@@ -235,6 +255,47 @@ def _normalize_active_locations(payload: Any) -> Dict[str, Any]:
 			return normalized
 		raise RuntimeError("CoreStack API returned empty active locations list")
 	raise RuntimeError("CoreStack API returned unexpected active locations payload")
+
+
+def _geocode_and_resolve(query: str, active_locations: Dict[str, Any]) -> Dict[str, Optional[str]]:
+	"""Geocode place names in the query to lat/lon, then resolve via CoreStack admin API."""
+	try:
+		from geopy.geocoders import Nominatim
+		geolocator = Nominatim(user_agent="corestack_agent")
+
+		# Extract likely place names: strip common non-location words
+		_strip_words = {
+			"cropping", "intensity", "vector", "raster", "data", "layer", "change",
+			"tree", "cover", "loss", "gain", "surface", "water", "availability",
+			"over", "years", "show", "me", "how", "has", "changed", "the", "in",
+			"of", "for", "from", "to", "and", "with", "average", "total", "all",
+			"available", "spatial", "analysis", "could", "you", "village", "tehsil",
+			"block", "district", "state", "india", "please", "what", "is", "are",
+		}
+		words = re.findall(r'[A-Za-z]+', query)
+		place_words = [w for w in words if w.lower() not in _strip_words and len(w) > 2]
+		search_query = " ".join(place_words) + ", India"
+		print(f"[CoreStack Debug] Geocoding query: {search_query}")
+
+		location = geolocator.geocode(search_query, timeout=10)
+		if location is None:
+			print("[CoreStack Debug] Geocoding returned no results")
+			return {"state": None, "district": None, "tehsil": None}
+
+		lat, lon = location.latitude, location.longitude
+		print(f"[CoreStack Debug] Geocoded to: {lat}, {lon}")
+
+		admin = _get_admin_details_by_latlon(lat, lon)
+		print(f"[CoreStack Debug] Admin from lat/lon: {admin}")
+		resolved = _normalize_location_for_active(admin, active_locations)
+		if all([resolved.get("state"), resolved.get("district"), resolved.get("tehsil")]):
+			print(f"[CoreStack Debug] Geocode resolved: {resolved}")
+			return resolved
+
+		return {"state": None, "district": None, "tehsil": None}
+	except Exception as e:
+		print(f"[CoreStack Debug] Geocoding failed: {e}")
+		return {"state": None, "district": None, "tehsil": None}
 
 
 def _get_admin_details_by_latlon(latitude: float, longitude: float) -> Dict[str, Optional[str]]:
@@ -274,61 +335,91 @@ def _normalize_location_for_active(location: Dict[str, Optional[str]],
 	return {"state": state_key, "district": district_key, "tehsil": tehsil_key}
 
 
+def _lc_words(text: str) -> set:
+	return set(re.findall(r'[a-z]+', text.lower()))
+
+
 def _match_location_from_query(query: str, active_locations: Dict[str, Any]) -> Dict[str, str]:
 	query_lc = query.lower()
+	query_words = _lc_words(query)
+	print(f"[CoreStack Debug] Location matching — query words: {query_words}")
+
 	best_state = None
 	best_district = None
 	best_tehsil = None
 
+	# Pass 1: match state, then district, then tehsil by word overlap
 	for state_name, state_data in active_locations.items():
-		state_lc = state_name.lower()
-		if state_lc in query_lc:
+		state_words = _lc_words(state_name)
+		if state_words & query_words or state_name.lower() in query_lc:
 			best_state = state_name
 			districts = state_data.get("districts", {})
 			for district_name, district_data in districts.items():
-				district_lc = district_name.lower()
-				if district_lc in query_lc:
+				district_words = _lc_words(district_name)
+				if district_words & query_words or district_name.lower() in query_lc:
 					best_district = district_name
 					tehsils = district_data.get("tehsils", [])
 					for tehsil_name in tehsils:
-						if tehsil_name.lower() in query_lc:
+						tehsil_words = _lc_words(tehsil_name)
+						if tehsil_words & query_words or tehsil_name.lower() in query_lc:
 							best_tehsil = tehsil_name
+							print(f"[CoreStack Debug] Matched: {best_state} > {best_district} > {best_tehsil}")
 							return {
 								"state": best_state,
 								"district": best_district,
 								"tehsil": best_tehsil
 							}
 
+	# Pass 2: state + district matched, pick first tehsil
 	if best_state and best_district:
 		tehsils = active_locations.get(best_state, {}).get("districts", {}).get(best_district, {}).get("tehsils", [])
 		best_tehsil = tehsils[0] if tehsils else None
+		print(f"[CoreStack Debug] Partial match (first tehsil): {best_state} > {best_district} > {best_tehsil}")
 		return {
 			"state": best_state,
 			"district": best_district,
 			"tehsil": best_tehsil
 		}
 
-	# Fallback: first matching district/tehsil without state in query
+	# Pass 3: match district or tehsil anywhere (no state in query)
 	for state_name, state_data in active_locations.items():
 		districts = state_data.get("districts", {})
 		for district_name, district_data in districts.items():
-			if district_name.lower() in query_lc:
+			district_words = _lc_words(district_name)
+			if district_words & query_words or district_name.lower() in query_lc:
 				best_state = state_name
 				best_district = district_name
 				tehsils = district_data.get("tehsils", [])
 				for tehsil_name in tehsils:
-					if tehsil_name.lower() in query_lc:
+					tehsil_words = _lc_words(tehsil_name)
+					if tehsil_words & query_words or tehsil_name.lower() in query_lc:
 						best_tehsil = tehsil_name
 						break
-					if best_tehsil:
-						break
+				if not best_tehsil:
 					best_tehsil = tehsils[0] if tehsils else None
+				print(f"[CoreStack Debug] Fallback match: {best_state} > {best_district} > {best_tehsil}")
+				return {
+					"state": best_state,
+					"district": best_district,
+					"tehsil": best_tehsil
+				}
+
+	# Pass 4: match just a tehsil name anywhere in any state/district
+	for state_name, state_data in active_locations.items():
+		districts = state_data.get("districts", {})
+		for district_name, district_data in districts.items():
+			tehsils = district_data.get("tehsils", [])
+			for tehsil_name in tehsils:
+				tehsil_words = _lc_words(tehsil_name)
+				if tehsil_words & query_words or tehsil_name.lower() in query_lc:
+					print(f"[CoreStack Debug] Tehsil-only match: {state_name} > {district_name} > {tehsil_name}")
 					return {
-						"state": best_state,
-						"district": best_district,
-						"tehsil": best_tehsil
+						"state": state_name,
+						"district": district_name,
+						"tehsil": tehsil_name
 					}
 
+	print(f"[CoreStack Debug] No text match found, falling back to geocoding")
 	return {"state": None, "district": None, "tehsil": None}
 
 
@@ -338,7 +429,10 @@ def _get_generated_layer_urls(state: str, district: str, tehsil: str) -> Any:
 		"district": district,
 		"tehsil": tehsil
 	}
-	return _corestack_request("get_generated_layer_urls/", params=params)
+	payload = _corestack_request("get_generated_layer_urls/", params=params)
+	print("\n[CoreStack Debug] Generated layer URLs payload type:", type(payload).__name__)
+	print("[CoreStack Debug] Generated layer URLs payload (truncated):", str(payload)[:1000])
+	return payload
 
 
 def _normalize_layer_payload(layer_payload: Any, location: Dict[str, str]) -> Dict[str, Any]:
@@ -349,9 +443,12 @@ def _normalize_layer_payload(layer_payload: Any, location: Dict[str, str]) -> Di
 	for layer in layer_payload:
 		layer_type = str(layer.get("layer_type", "")).lower()
 		layer_name = layer.get("layer_name")
+		dataset_name = layer.get("dataset_name") or layer.get("dataset")
 		layer_url = layer.get("layer_url")
 		if not layer_name or not layer_url:
 			continue
+		if dataset_name and dataset_name not in layer_name:
+			layer_name = f"{dataset_name} ({layer_name})"
 		entry = {
 			"layer_name": layer_name,
 			"layer_type": "vector" if "vector" in layer_type else "raster",
@@ -421,13 +518,22 @@ def _run_corestack_workflow(user_query: str) -> Dict[str, Any]:
 	try:
 		active_locations = _fetch_active_locations()
 		location = {"state": None, "district": None, "tehsil": None}
+
+		# Strategy 1: lat/lon from query -> admin API
 		if parsed.get("latitude") is not None and parsed.get("longitude") is not None:
 			admin_location = _get_admin_details_by_latlon(parsed["latitude"], parsed["longitude"])
 			location = _normalize_location_for_active(admin_location, active_locations)
 			if not all([location.get("state"), location.get("district"), location.get("tehsil")]):
 				location = {"state": None, "district": None, "tehsil": None}
+
+		# Strategy 2: text matching against active locations
 		if not all([location.get("state"), location.get("district"), location.get("tehsil")]):
 			location = _match_location_from_query(user_query, active_locations)
+
+		# Strategy 3: geocode place name from query -> lat/lon -> admin API
+		if not all([location.get("state"), location.get("district"), location.get("tehsil")]):
+			location = _geocode_and_resolve(user_query, active_locations)
+
 		if not all([location.get("state"), location.get("district"), location.get("tehsil")]):
 			return {
 				"available_layers": _build_local_layer_catalog(),
