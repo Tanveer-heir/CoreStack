@@ -11,7 +11,6 @@ import json
 import traceback
 from datetime import datetime
 from typing import Dict, Any, Optional
-from contextvars import ContextVar
 from contextlib import redirect_stdout
 
 from dotenv import load_dotenv
@@ -25,9 +24,6 @@ DOCKER_AVAILABLE = True  # Assume Docker is available like in agent.py
 # Import Earth Engine
 import ee
 
-# Langfuse
-from langfuse import Langfuse
-
 load_dotenv()
 
 # Get API keys
@@ -35,10 +31,8 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 CORE_STACK_API_KEY = os.getenv("CORE_STACK_API_KEY")
 CORESTACK_BASE_URL = os.getenv("CORESTACK_BASE_URL", "https://geoserver.core-stack.org/api/v1")
 
-# Langfuse keys
-LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY")
-LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY")
-LANGFUSE_HOST = os.getenv("LANGFUSE_HOST")
+# Langfuse keys (read from .env via LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, LANGFUSE_BASE_URL)
+# These are auto-read by the Langfuse SDK from env vars — no manual assignment needed.
 
 # Initialize Earth Engine
 GEE_PROJECT = os.getenv("GEE_PROJECT")
@@ -88,76 +82,38 @@ CORESTACK_DATA_PRODUCTS = {
 }
 
 # ============================================================================
-# LANGFUSE TRACING
+# LANGFUSE + OPENTELEMETRY AUTO-INSTRUMENTATION (smolagents)
+# ============================================================================
+# The SmolagentsInstrumentor automatically traces every LLM call, tool
+# execution, code block, and error produced by the smolagents CodeAgent.
+# Langfuse reads LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, LANGFUSE_BASE_URL
+# directly from environment variables (set via .env / load_dotenv).
 # ============================================================================
 
-_LANGFUSE_TRACE: ContextVar[Optional[Any]] = ContextVar("langfuse_trace", default=None)
-_LANGFUSE_CLIENT: Optional[Langfuse] = None
+try:
+	from openinference.instrumentation.smolagents import SmolagentsInstrumentor
+	from langfuse import observe, get_client as _get_langfuse_client
 
+	# Instrument smolagents — must happen BEFORE any CodeAgent is created
+	SmolagentsInstrumentor().instrument()
 
-def _get_langfuse_client() -> Optional[Langfuse]:
-	global _LANGFUSE_CLIENT
-	if _LANGFUSE_CLIENT is not None:
-		return _LANGFUSE_CLIENT
-	if not (LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY and LANGFUSE_HOST):
-		return None
-	try:
-		_LANGFUSE_CLIENT = Langfuse(
-			public_key=LANGFUSE_PUBLIC_KEY,
-			secret_key=LANGFUSE_SECRET_KEY,
-			host=LANGFUSE_HOST
-		)
-		return _LANGFUSE_CLIENT
-	except Exception:
-		return None
-
-
-def _start_trace(user_query: str, model_id: str) -> Optional[Any]:
-	client = _get_langfuse_client()
-	if client is None:
-		return None
-	try:
-		return client.trace(
-			name="run_hybrid_agent",
-			input=user_query,
-			metadata={
-				"user_query": user_query,
-				"timestamp": datetime.utcnow().isoformat(),
-				"model_id": model_id
-			}
-		)
-	except Exception:
-		return None
-
-
-def _start_span(trace: Optional[Any], name: str, input_data: Optional[Any] = None,
-				metadata: Optional[Dict[str, Any]] = None) -> Optional[Any]:
-	if trace is None:
-		return None
-	try:
-		return trace.span(name=name, input=input_data, metadata=metadata or {})
-	except Exception:
-		return None
-
-
-def _end_span(span: Optional[Any], output_data: Optional[Any] = None,
-			  metadata: Optional[Dict[str, Any]] = None) -> None:
-	if span is None:
-		return
-	try:
-		span.end(output=output_data, metadata=metadata or {})
-	except Exception:
-		pass
-
-
-def _update_trace(trace: Optional[Any], output_data: Optional[Any] = None,
-				  metadata: Optional[Dict[str, Any]] = None) -> None:
-	if trace is None:
-		return
-	try:
-		trace.update(output=output_data, metadata=metadata or {})
-	except Exception:
-		pass
+	# Verify connection
+	_lf_client = _get_langfuse_client()
+	if _lf_client.auth_check():
+		print("✅ Langfuse connected — smolagents auto-instrumentation active")
+	else:
+		print("⚠️  Langfuse auth check failed — traces will NOT be recorded")
+	_LANGFUSE_ENABLED = True
+except Exception as _lf_err:
+	print(f"⚠️  Langfuse/OpenTelemetry init skipped: {_lf_err}")
+	_LANGFUSE_ENABLED = False
+	# Provide a no-op decorator so @observe() doesn't crash
+	def observe(*args, **kwargs):
+		def decorator(fn):
+			return fn
+		if args and callable(args[0]):
+			return args[0]
+		return decorator
 
 
 class _TeeStdout:
@@ -590,11 +546,6 @@ def fetch_corestack_data(query: str) -> str:
 	print(f"   Query: {query}")
 	print("="*70)
 
-	trace = _LANGFUSE_TRACE.get()
-	span = _start_span(trace, "tool_execution", input_data={"query": query}, metadata={
-		"tool_name": "fetch_corestack_data"
-	})
-
 	try:
 		# Run workflow
 		result_state = _run_corestack_workflow(query)
@@ -605,7 +556,6 @@ def fetch_corestack_data(query: str) -> str:
 				"success": False,
 				"error": result_state["error"]
 			}, indent=2)
-			_end_span(span, output_data=response, metadata={"success": False})
 			return response
 
 		# Extract available layers
@@ -637,7 +587,6 @@ def fetch_corestack_data(query: str) -> str:
 		print(f"   Raster layers: {len(available_layers.get('raster', []))}")
 
 		response = json.dumps(response_obj, default=str)
-		_end_span(span, output_data=response, metadata={"success": True})
 		return response
 
 	except Exception as e:
@@ -647,7 +596,6 @@ def fetch_corestack_data(query: str) -> str:
 			"success": False,
 			"error": str(e)
 		}, indent=2)
-		_end_span(span, output_data=response, metadata={"success": False, "error": str(e)})
 		return response
 
 
@@ -796,7 +744,7 @@ FALLBACK: If custom time period (e.g., "2018-2024"):
    The ONLY column to group by after sjoin is `id_drought` (the drought GDF's `id` column with lsuffix).
    The sjoin MUST use: `lsuffix='drought', rsuffix='crop'`
    After sjoin, print columns: `print(joined.columns.tolist())` to verify.
-T:\CS Journey\Projectss\Project\Core_Stack\CoreStack\main.py
+
 ⚠️ CRITICAL LAYER NAME MATCHING:
 - The drought layer name is `"Drought (dharwad_navalgund_drought)"` — match with `'drought' in name.lower()`
 - The cropping layer name is `"Cropping Intensity (dharwad_navalgund_intensity)"` — match with `'cropping' in name.lower() and 'intensity' in name.lower()`
@@ -1437,6 +1385,68 @@ Cropping Intensity (CI, 2017-2023), then tests the hypothesis that higher LST �
 
 ═══════════════════════════════════════════════════════════════════════════════
 
+**Query Type 17: "Rank microwatersheds by a composite Agricultural Suitability Index (ASI) considering temperature, cropping intensity, and water availability during the growing phenological stage"**
+This query builds a multi-criteria suitability index per microwatershed (MWS), inspired by the FAO
+Global Agro-Ecological Zones (GAEZ) framework and standard Multi-Criteria Decision Analysis (MCDA)
+for agricultural land evaluation.
+
+✅ DATA SOURCES:
+- **Cropping Intensity vector** from CoreStack — `cropping_intensity_YYYY` columns (2017-2023).
+- **Landsat 8 Collection 2 Level 2** from GEE — ST_B10 thermal band → mean LST in °C (2017-2023, all months).
+- **Surface Water Bodies vector** from CoreStack — seasonal water area columns per hydro-year:
+  `k_YY-YY` (kharif/monsoon = growing-season water), `kr_YY-YY` (kharif+rabi), `krz_YY-YY` (perennial).
+  Linked to MWS via `MWS_UID`. Multiple water bodies per MWS → aggregate by `MWS_UID` using sum.
+
+🔴 MANDATORY: For this query type, COPY the code from EXAMPLE 15 below almost verbatim.
+⚠️ DO NOT add try/except blocks. DO NOT wrap code in additional if/else nesting.
+   Keep the FLAT code structure exactly as shown.
+
+**SCIENTIFIC RATIONALE (FAO GAEZ / MCDA):**
+- **Thermal Suitability**: In semi-arid India (Navalgund), mean LSTs range ~37-45 °C, well above the
+  optimal 25-35 °C for dominant crops (sorghum, cotton, groundnut). Higher LST = more heat stress =
+  LOWER suitability. We use *inverse* min-max normalisation so cooler MWS score higher.
+- **Cropping Intensity**: Direct productivity indicator. CI ≈ 1.0 = single-crop, CI ≈ 2.0 = double-crop.
+  Higher CI = greater agricultural output per unit area = HIGHER suitability.
+- **Growing-Season Water Availability**: The `k_YY-YY` (kharif/monsoon-season) water-area columns
+  capture water spread during June-October — the main crop-growing phenological window (Green-up →
+  Peak Vegetation). More surface water during this stage supports irrigation and soil moisture,
+  directly boosting suitability.
+
+**COMPOSITE INDEX FORMULA (Weighted Linear Combination):**
+  ASI = w_ci × CI_norm + w_temp × (1 − LST_norm) + w_water × SW_norm
+
+  Where:
+    CI_norm  = min-max normalised mean Cropping Intensity [0-1]
+    LST_norm = min-max normalised mean Land Surface Temperature [0-1]
+    SW_norm  = min-max normalised mean kharif surface-water area [0-1]
+    w_ci     = 0.40  (strongest direct productivity indicator)
+    w_temp   = 0.30  (heat-stress penalty)
+    w_water  = 0.30  (growing-season resource availability)
+
+  Range: 0 (least suitable) → 1 (most suitable).
+
+**METHODOLOGY:**
+1. Call fetch_corestack_data ONCE → get vector_layers list.
+2. Print ALL layer names.
+3. Load Cropping Intensity vector → compute `mean_ci` per MWS (avg of cropping_intensity_2017…2023).
+4. Load Surface Water Bodies vector (match: `'surface water' in name.lower()` AND `'zoi' not in name.lower()`).
+   Print columns. Identify kharif water-area columns: those matching pattern `k_YY-YY` BUT NOT starting
+   with `kr` (i.e., single `k_` prefix = kharif only). Aggregate by `MWS_UID` using sum.
+   Compute `mean_kharif_sw` per MWS (average of kharif columns across years).
+5. Extract centroid lat/lon per MWS polygon.
+6. Initialise GEE, build Landsat 8 mean LST composite (2017-2023, all months, cloud-masked).
+7. Sample LST at centroids → merge with CI and SW on `uid` / `MWS_UID`.
+8. Min-max normalise all three indicators.
+9. Compute ASI = 0.40 * CI_norm + 0.30 * (1 - LST_norm) + 0.30 * SW_norm.
+10. Rank MWS by ASI descending.
+11. Visualisation: horizontal bar chart (top 25 MWS) with stacked component contributions +
+    a colour-coded choropleth-style legend.
+12. Export: bar-chart PNG + GeoJSON with all component scores, ASI, and rank.
+
+- Output: ranked bar chart PNG, GeoJSON with ASI scores per MWS
+
+═══════════════════════════════════════════════════════════════════════════════
+
 Instructions:
 1. **CORESTACK PRIORITY (PRIMARY)**: For ANY query about India or Indian locations, you MUST call fetch_corestack_data FIRST to access CoreStack database. Available CoreStack layers:
    - Raster: {', '.join(CORESTACK_DATA_PRODUCTS['raster_layers'])}
@@ -1630,7 +1640,7 @@ For multi-region layers: Read ALL URLs, concat GeoDataFrames, then analyze.
 		# Sort by year code (extract the YY_YY part) to find earliest and latest
 		import re as re_mod
 		def extract_year(name):
-			m = re_mod.search(r'lulc_(\d{{2}})_(\d{{2}})', name.lower())
+			m = re_mod.search(r'lulc_(\\d{{2}})_(\\d{{2}})', name.lower())
 			if m:
 				return int(m.group(1))
 			return 0
@@ -3310,6 +3320,211 @@ For multi-region layers: Read ALL URLs, concat GeoDataFrames, then analyze.
 		)
 		final_answer(result_text)
 
+	# ═══════════════════════════════════════════════════════════════════════
+	# ║  EXAMPLE 15: AGRICULTURAL SUITABILITY INDEX — RANK MWS             ║
+	# ║  Data: Cropping Intensity (CoreStack) + Landsat 8 LST (GEE)        ║
+	# ║        + Surface Water Bodies kharif season (CoreStack)             ║
+	# ║  ⚠️ For Query Type 17, COPY THIS CODE ALMOST VERBATIM.             ║
+	# ═══════════════════════════════════════════════════════════════════════
+	# --- Example query: "Rank microwatersheds in Navalgund, Dharwad, Karnataka
+	#     by suitability index considering temperature, cropping intensity,
+	#     and water availability during the growing phenological stage."
+
+	import json, os, re, math
+	import geopandas as gpd
+	import pandas as pd
+	import numpy as np
+	import matplotlib
+	matplotlib.use('Agg')
+	import matplotlib.pyplot as plt
+	import matplotlib.colors as mcolors
+
+	LOCATION = "Navalgund Dharwad Karnataka"   # ← Replace with user's tehsil district state
+
+	os.makedirs('./exports', exist_ok=True)
+
+	# ── Step 1: Fetch all CoreStack layers ──────────────────────────────
+	result = fetch_corestack_data(f"{{LOCATION}} cropping intensity surface water")
+	data = json.loads(result)
+	vector_layers = data['spatial_data']['vector_layers']
+	for vl in vector_layers:
+		print(f"  - {{vl['layer_name']}}")
+
+	# ── Step 2: Load Cropping Intensity ─────────────────────────────────
+	ci_layer = None
+	for vl in vector_layers:
+		if 'cropping' in vl['layer_name'].lower() and 'intensity' in vl['layer_name'].lower():
+			ci_layer = vl
+			break
+	print(f"CI layer: {{ci_layer['layer_name']}}")
+	ci_gdf = gpd.read_file(ci_layer['urls'][0]['url'])
+	ci_gdf = ci_gdf.to_crs(epsg=4326)
+	ci_year_cols = sorted([c for c in ci_gdf.columns if 'cropping_intensity_' in c and re.search(r'\\d{{4}}', c)])
+	print(f"CI year columns: {{ci_year_cols}}")
+	ci_gdf['mean_ci'] = ci_gdf[ci_year_cols].apply(pd.to_numeric, errors='coerce').mean(axis=1)
+	print(f"Mean CI range: {{ci_gdf['mean_ci'].min():.2f}} to {{ci_gdf['mean_ci'].max():.2f}}")
+
+	# ── Step 3: Load Surface Water Bodies (kharif season) ───────────────
+	sw_layer = None
+	for vl in vector_layers:
+		nm = vl['layer_name'].lower()
+		if 'surface water' in nm and 'zoi' not in nm:
+			sw_layer = vl
+			break
+	print(f"SW layer: {{sw_layer['layer_name']}}")
+	sw_gdf = gpd.read_file(sw_layer['urls'][0]['url'])
+	sw_gdf = sw_gdf.to_crs(epsg=4326)
+	print(f"SW columns: {{list(sw_gdf.columns)}}")
+	print(f"SW shape: {{sw_gdf.shape}}")
+
+	# Identify kharif-only water columns: start with 'k_' but NOT 'kr_' or 'krz_'
+	kharif_cols = [c for c in sw_gdf.columns if re.match(r'^k_\\d', c)]
+	print(f"Kharif water columns: {{kharif_cols}}")
+	for kc in kharif_cols:
+		sw_gdf[kc] = pd.to_numeric(sw_gdf[kc], errors='coerce').fillna(0)
+
+	# Aggregate by MWS_UID
+	sw_agg = sw_gdf.groupby('MWS_UID')[kharif_cols].sum().reset_index()
+	sw_agg['mean_kharif_sw'] = sw_agg[kharif_cols].mean(axis=1)
+	print(f"SW aggregated MWS count: {{len(sw_agg)}}")
+	print(f"Mean kharif SW range: {{sw_agg['mean_kharif_sw'].min():.2f}} to {{sw_agg['mean_kharif_sw'].max():.2f}}")
+
+	# ── Step 4: Extract centroids for GEE LST sampling ──────────────────
+	ci_gdf['centroid_lon'] = ci_gdf.geometry.centroid.x
+	ci_gdf['centroid_lat'] = ci_gdf.geometry.centroid.y
+
+	# ── Step 5: GEE — Landsat 8 mean LST (2017-2023, all months) ────────
+	import ee
+	ee.Initialize(project='corestack-gee')
+
+	minx, miny, maxx, maxy = ci_gdf.total_bounds
+	ee_roi = ee.Geometry.Rectangle([float(minx), float(miny), float(maxx), float(maxy)])
+	print(f"GEE ROI: [{{minx:.4f}}, {{miny:.4f}}, {{maxx:.4f}}, {{maxy:.4f}}]")
+
+	l8 = (ee.ImageCollection('LANDSAT/LC08/C02/T1_L2')
+		  .filterBounds(ee_roi)
+		  .filterDate('2017-01-01', '2024-01-01')
+		  .filter(ee.Filter.lt('CLOUD_COVER', 30)))
+	print(f"Total Landsat 8 scenes: {{l8.size().getInfo()}}")
+
+	def cloud_mask_l8(img):
+		qa = img.select('QA_PIXEL')
+		mask = qa.bitwiseAnd(1 << 3).eq(0).And(qa.bitwiseAnd(1 << 4).eq(0))
+		return img.updateMask(mask)
+
+	def compute_lst(img):
+		return img.select('ST_B10').multiply(0.00341802).add(149.0).subtract(273.15).rename('LST')
+
+	lst_composite = l8.map(cloud_mask_l8).map(compute_lst).mean().clip(ee_roi)
+
+	# Build centroid FeatureCollection
+	fc_features = []
+	for _, row in ci_gdf.iterrows():
+		pt = ee.Geometry.Point([float(row['centroid_lon']), float(row['centroid_lat'])])
+		fc_features.append(ee.Feature(pt, {{'uid': str(row['uid'])}}))
+	ee_fc = ee.FeatureCollection(fc_features)
+	print(f"Created {{len(fc_features)}} centroid points")
+
+	sampled = lst_composite.sampleRegions(collection=ee_fc, scale=30, geometries=False).getInfo()
+	print(f"GEE returned {{len(sampled['features'])}} sampled points")
+
+	lst_records = []
+	for feat in sampled['features']:
+		p = feat['properties']
+		if 'LST' in p and p['LST'] is not None:
+			lst_records.append({{'uid': p['uid'], 'mean_lst': p['LST']}})
+	lst_df = pd.DataFrame(lst_records)
+	print(f"Valid LST values: {{len(lst_df)}}")
+	print(f"LST range: {{lst_df['mean_lst'].min():.2f}} to {{lst_df['mean_lst'].max():.2f}} °C")
+
+	# ── Step 6: Merge all three datasets ─────────────────────────────────
+	merged = ci_gdf[['uid', 'mean_ci', 'geometry']].merge(lst_df, on='uid', how='inner')
+	merged['uid_str'] = merged['uid'].astype(str)
+	sw_agg['MWS_UID_str'] = sw_agg['MWS_UID'].astype(str)
+	merged = merged.merge(sw_agg[['MWS_UID', 'mean_kharif_sw']], left_on='uid', right_on='MWS_UID', how='left')
+	merged['mean_kharif_sw'] = merged['mean_kharif_sw'].fillna(0)
+	print(f"Merged MWS count: {{len(merged)}}")
+
+	# ── Step 7: Min-max normalisation ────────────────────────────────────
+	def minmax(s):
+		return (s - s.min()) / (s.max() - s.min()) if s.max() != s.min() else pd.Series(0.5, index=s.index)
+
+	merged['ci_norm'] = minmax(merged['mean_ci'])
+	merged['lst_norm'] = minmax(merged['mean_lst'])
+	merged['sw_norm'] = minmax(merged['mean_kharif_sw'])
+
+	# ── Step 8: Composite Agricultural Suitability Index ─────────────────
+	W_CI, W_TEMP, W_WATER = 0.40, 0.30, 0.30
+	merged['ASI'] = (W_CI * merged['ci_norm']
+					 + W_TEMP * (1 - merged['lst_norm'])
+					 + W_WATER * merged['sw_norm'])
+	merged['rank'] = merged['ASI'].rank(ascending=False, method='min').astype(int)
+	merged = merged.sort_values('rank')
+	print(f"\n═══ AGRICULTURAL SUITABILITY INDEX (ASI) — TOP 10 ═══")
+	print(f"Formula: ASI = {{W_CI}}×CI_norm + {{W_TEMP}}×(1−LST_norm) + {{W_WATER}}×SW_norm")
+	print(f"{{'-'*70}}")
+	for _, r in merged.head(10).iterrows():
+		print(f"  Rank {{r['rank']:>3}}  |  uid={{r['uid']:<12}}  |  ASI={{r['ASI']:.4f}}  |  CI={{r['mean_ci']:.2f}}  LST={{r['mean_lst']:.1f}}°C  SW={{r['mean_kharif_sw']:.1f}} ha")
+
+	# ── Step 9: Bar chart — top 25 with stacked components ───────────────
+	top25 = merged.head(25).copy()
+	top25['comp_ci'] = W_CI * top25['ci_norm']
+	top25['comp_temp'] = W_TEMP * (1 - top25['lst_norm'])
+	top25['comp_water'] = W_WATER * top25['sw_norm']
+
+	fig, ax = plt.subplots(figsize=(12, 10))
+	y_pos = range(len(top25))
+	bar_labels = [str(uid) for uid in top25['uid']]
+
+	ax.barh(y_pos, top25['comp_ci'], color='#2ecc71', label=f'Cropping Intensity (w={{W_CI}})')
+	ax.barh(y_pos, top25['comp_temp'], left=top25['comp_ci'], color='#e67e22',
+		   label=f'Thermal Suitability (w={{W_TEMP}})')
+	ax.barh(y_pos, top25['comp_water'],
+		   left=top25['comp_ci'] + top25['comp_temp'], color='#3498db',
+		   label=f'Water Availability (w={{W_WATER}})')
+
+	for i, (_, r) in enumerate(top25.iterrows()):
+		ax.text(r['ASI'] + 0.005, i, f"{{r['ASI']:.3f}}", va='center', fontsize=8)
+
+	ax.set_yticks(y_pos)
+	ax.set_yticklabels(bar_labels, fontsize=8)
+	ax.invert_yaxis()
+	ax.set_xlabel('Agricultural Suitability Index (ASI)', fontsize=11)
+	ax.set_title(f'Top 25 Microwatersheds by Agricultural Suitability — {{LOCATION}}',
+				 fontsize=13, fontweight='bold')
+	ax.legend(loc='lower right', fontsize=9)
+	ax.set_xlim(0, min(1.0, top25['ASI'].max() + 0.08))
+	plt.tight_layout()
+	plt.savefig('./exports/agricultural_suitability_index.png', dpi=200)
+	plt.close()
+	print(f"\nBar chart saved to ./exports/agricultural_suitability_index.png")
+
+	# ── Step 10: Export GeoJSON ───────────────────────────────────────────
+	export_cols = ['uid', 'mean_ci', 'mean_lst', 'mean_kharif_sw',
+				   'ci_norm', 'lst_norm', 'sw_norm', 'ASI', 'rank', 'geometry']
+	export_gdf = gpd.GeoDataFrame(merged[export_cols], geometry='geometry')
+	export_gdf.to_file('./exports/agricultural_suitability_index.geojson', driver='GeoJSON')
+	print(f"GeoJSON exported to ./exports/agricultural_suitability_index.geojson")
+
+	# ── Step 11: Build final answer ───────────────────────────────────────
+	top3 = merged.head(3)
+	t1 = top3.iloc[0]
+	t2 = top3.iloc[1]
+	t3 = top3.iloc[2]
+	result_text = (
+		f"Agricultural Suitability Index ranking complete for"
+		f" {{len(merged)}} microwatersheds in {{LOCATION}}.\n\n"
+		f"Formula: ASI = {{W_CI}}*CI_norm + {{W_TEMP}}*(1-LST_norm) + {{W_WATER}}*SW_norm\n\n"
+		f"Top 3 ranked MWS:\n"
+		f"  1. uid={{t1['uid']}}  ASI={{t1['ASI']:.4f}}  CI={{t1['mean_ci']:.2f}}  LST={{t1['mean_lst']:.1f}} C  SW={{t1['mean_kharif_sw']:.1f}} ha\n"
+		f"  2. uid={{t2['uid']}}  ASI={{t2['ASI']:.4f}}  CI={{t2['mean_ci']:.2f}}  LST={{t2['mean_lst']:.1f}} C  SW={{t2['mean_kharif_sw']:.1f}} ha\n"
+		f"  3. uid={{t3['uid']}}  ASI={{t3['ASI']:.4f}}  CI={{t3['mean_ci']:.2f}}  LST={{t3['mean_lst']:.1f}} C  SW={{t3['mean_kharif_sw']:.1f}} ha\n\n"
+		f"Exports:\n"
+		f"- Bar chart: ./exports/agricultural_suitability_index.png\n"
+		f"- GeoJSON: ./exports/agricultural_suitability_index.geojson"
+	)
+	final_answer(result_text)
+
 	elif data['success'] and data['data_type'] == 'timeseries':
 		# Access timeseries data
 		timeseries = data['timeseries_data']
@@ -3374,12 +3589,14 @@ Task: {task}
 # HYBRID AGENT (CodeAct + CoreStack Tool)
 # ============================================================================
 
+@observe(name="run_hybrid_agent")
 def run_hybrid_agent(user_query: str, exports_dir: str = None):
 	"""
 	Run CodeAct agent with CoreStack tool + local execution (like agent.py).
 
 	Uses Gemini model with local executor for full geospatial library support.
 	Structure exactly mirrors agent.py but with CoreStack tool added.
+	Langfuse auto-traces all LLM calls, tool invocations, and code blocks.
 	"""
 	# Set up absolute exports directory
 	if exports_dir is None:
@@ -3412,9 +3629,6 @@ def run_hybrid_agent(user_query: str, exports_dir: str = None):
 		executor_kwargs={"timeout_seconds": 120}
 	)
 
-	trace = _start_trace(user_query, model.model_id)
-	trace_token = _LANGFUSE_TRACE.set(trace)
-
 	stdout_buffer = io.StringIO()
 	tee_stdout = _TeeStdout(sys.stdout, stdout_buffer)
 
@@ -3422,25 +3636,12 @@ def run_hybrid_agent(user_query: str, exports_dir: str = None):
 		# Generate prompt and run agent
 		prompt = create_corestack_prompt(user_query)
 
-		model_span = _start_span(trace, "model_generation", input_data=prompt, metadata={
-			"model_id": model.model_id
-		})
-
-		exec_span = _start_span(trace, "code_execution", input_data={"user_query": user_query})
-
+		# smolagents auto-instrumentation captures every LLM call, tool call,
+		# and code execution step automatically via SmolagentsInstrumentor.
 		with redirect_stdout(tee_stdout):
 			result = agent.run(prompt)
 
 		execution_logs = stdout_buffer.getvalue()
-		generated_code = _extract_code_blocks(execution_logs)
-
-		_end_span(model_span, output_data=result, metadata={
-			"prompt": prompt,
-			"generated_code": generated_code
-		})
-		_end_span(exec_span, output_data=result, metadata={
-			"execution_logs": execution_logs
-		})
 
 		print("\n" + "="*70)
 		print("✅ AGENT COMPLETED")
@@ -3448,24 +3649,13 @@ def run_hybrid_agent(user_query: str, exports_dir: str = None):
 		print(result)
 		print("="*70)
 
-		_update_trace(trace, output_data=result, metadata={
-			"execution_logs": execution_logs,
-			"generated_code": generated_code
-		})
-
 		return result
 
 	except Exception as e:
 		error_msg = f"Agent execution failed: {str(e)}"
 		print(f"\n❌ ERROR: {error_msg}")
-		error_details = traceback.format_exc()
-		_update_trace(trace, output_data=error_msg, metadata={
-			"error": str(e),
-			"traceback": error_details
-		})
+		traceback.print_exc()
 		raise e
-	finally:
-		_LANGFUSE_TRACE.reset(trace_token)
 
 
 # ============================================================================
@@ -3479,9 +3669,9 @@ if __name__ == "__main__":
 	print("Bot TEST")
 	print("="*70)
 
-	# print("Running query #1 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
-	# print("="*70)
-	# run_hybrid_agent("Could you show how cropping intensity has changed over the years in Navalgund, Dharwad, Karnataka?")
+	print("Running query #1 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+	print("="*70)
+	run_hybrid_agent("Could you show how cropping intensity has changed over the years in Navalgund, Dharwad, Karnataka?")
 
 	# print("Running query #2 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
 	# print("="*70)
@@ -3547,7 +3737,11 @@ if __name__ == "__main__":
 	# print("="*70)
 	# run_hybrid_agent("For the microwatersheds in Navalgund, Dharwad, Karnataka identified in the phenological stage analysis, create a scatterplot of runoff accumulation per phenological stage vs cropping intensity. Use the Drought vector rd columns for weekly runoff data, sum them per month, then accumulate per phenological stage per MWS. Plot against cropping intensity from the Cropping Intensity vector for years 2019-2020. Color by phenological stage.")
 
-	print("Running query #16 from CSV (Navalgund, Dharwad, Karnataka)...")
-	print("="*70)
-	run_hybrid_agent("For my Navalgund tehsil in Dharwad, Karnataka, test the hypothesis that villages with higher average temperature have higher cropping intensity. Compute per-MWS average Land Surface Temperature from Landsat 8 and cropping intensity from CoreStack, build a scatterplot, and perform hypothesis testing (Pearson correlation + t-test on hot vs cool groups).")
+	# print("Running query #16 from CSV (Navalgund, Dharwad, Karnataka)...")
+	# print("="*70)
+	# run_hybrid_agent("For my Navalgund tehsil in Dharwad, Karnataka, test the hypothesis that villages with higher average temperature have higher cropping intensity. Compute per-MWS average Land Surface Temperature from Landsat 8 and cropping intensity from CoreStack, build a scatterplot, and perform hypothesis testing (Pearson correlation + t-test on hot vs cool groups).")
+
+	# print("Running query #17 from CSV (Navalgund, Dharwad, Karnataka)...")
+	# print("="*70)
+	# run_hybrid_agent("For my Navalgund tehsil in Dharwad, Karnataka, rank microwatersheds by a composite Agricultural Suitability Index considering temperature (Landsat 8 LST), cropping intensity (CoreStack CI vector), and surface water availability during the growing phenological stage (kharif season from Surface Water Bodies vector). Use weighted linear combination: ASI = 0.40*CI_norm + 0.30*(1-LST_norm) + 0.30*SW_norm. Export ranked bar chart and GeoJSON.")
 

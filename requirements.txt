@@ -17,3 +17,6 @@ pypdf
 earthengine-api
 pydantic
 langfuse
+openinference-instrumentation-smolagents
+opentelemetry-sdk
+opentelemetry-exporter-otlp
