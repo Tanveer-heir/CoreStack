@@ -41,7 +41,7 @@ LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY")
 LANGFUSE_HOST = os.getenv("LANGFUSE_HOST")
 
 # Initialize Earth Engine
-GEE_PROJECT = os.getenv("GEE_PROJECT", "apt-achievment-453417-h6")
+GEE_PROJECT = os.getenv("GEE_PROJECT")
 try:
 	ee.Initialize(project=GEE_PROJECT)
 	print(f"✅ Earth Engine initialized with project: {GEE_PROJECT}")
@@ -1165,6 +1165,245 @@ in a scatter plot with 4 quadrants (High/Low CI × High/Low Runoff).
 
 ═══════════════════════════════════════════════════════════════════════════════
 
+═══════════════════════════════════════════════════════════════════════════════
+
+**Query Type 13: "Create a scatterplot of average monsoon temperature vs cropping intensity"**
+This query computes two metrics per micro-watershed (MWS) and plots them as a scatter:
+- **X-axis**: Average monsoon Land Surface Temperature (°C) — from Landsat 8 via Google Earth Engine
+- **Y-axis**: Average Cropping Intensity (%) — from CoreStack cropping_intensity_vector
+
+✅ DATA SOURCES:
+- **Cropping Intensity**: CoreStack `cropping_intensity_vector` (columns: `cropping_intensity_2017` through `cropping_intensity_2024`)
+- **Land Surface Temperature (LST)**: Google Earth Engine — Landsat 8 Collection 2 Level 2 (`LANDSAT/LC08/C02/T1_L2`)
+  - Band: `ST_B10` (Surface Temperature)
+  - Scale factor: `ST_B10 * 0.00341802 + 149.0` → Kelvin, then `- 273.15` → Celsius
+  - Cloud masking: `QA_PIXEL` band — bits 3 (cloud) and 4 (cloud shadow) must be 0
+  - Monsoon season: June–September (months 6–9)
+  - Years: 2017–2023 (Landsat 8 availability overlap with CoreStack CI data)
+
+⛔ CoreStack does NOT have LST data — GEE is MANDATORY for temperature.
+⛔ NEVER fabricate temperature values. ALWAYS fetch real Landsat LST from GEE.
+⛔ NEVER pass MWS IDs or uid columns to GEE. GEE only understands lat/lon coordinates.
+
+🔴 MANDATORY: For this query type, COPY the code from EXAMPLE 11 below almost verbatim.
+
+⚠️ CRITICAL APPROACH — CENTROID-BASED LST EXTRACTION (NOT polygon-based):
+The agent MUST extract lat/lon centroids from MWS polygons and sample LST at those points.
+DO NOT try to upload MWS polygons to GEE as ee.FeatureCollection — that causes hallucination.
+DO NOT try to use reduceRegions with MWS polygons — too complex and error-prone.
+Instead:
+1. Compute centroid of each MWS polygon → get (lat, lon) per MWS
+2. Build a SINGLE mean monsoon LST image on GEE (composite across ALL years 2017-2023)
+3. Sample that image at each centroid point using ee.Image.sample() or ee.Image.reduceRegion()
+4. Bring values client-side and merge with cropping intensity
+
+⚠️ CRITICAL LAYER NAME MATCHING:
+- Cropping Intensity: `'cropping' in name.lower() and 'intensity' in name.lower()`
+- ALWAYS print ALL vector layer names FIRST
+
+**METHODOLOGY:**
+1. Call fetch_corestack_data ONCE → get vector_layers list
+2. Print ALL layer names
+3. Find and load: Cropping Intensity vector as GeoDataFrame (EPSG:4326)
+4. Compute mean cropping intensity per MWS: average `cropping_intensity_YYYY` for 2017-2023
+5. Compute centroid lat/lon for each MWS polygon:
+   `ci_gdf['centroid_lon'] = ci_gdf.geometry.centroid.x`
+   `ci_gdf['centroid_lat'] = ci_gdf.geometry.centroid.y`
+6. Build ROI bounding box from the GeoDataFrame total_bounds:
+   `minx, miny, maxx, maxy = ci_gdf.total_bounds`
+   `ee_roi = ee.Geometry.Rectangle([minx, miny, maxx, maxy])`
+7. Initialize Earth Engine: `ee.Initialize(project='corestack-gee')`
+8. Build a SINGLE multi-year monsoon mean LST image:
+   a. For each year 2017-2023: filter Landsat 8 C2L2 to June 1 – Sept 30, apply cloud mask
+   b. Compute LST in Celsius per image
+   c. Take .mean() composite per year, then merge all yearly composites → overall mean
+   OR simply: filter ALL years June-Sept at once → single .mean() composite
+9. For EACH MWS centroid (iterate rows of ci_gdf):
+   a. Create ee.Geometry.Point([lon, lat])
+   b. Call `monsoon_lst_image.reduceRegion(ee.Reducer.mean(), point_geom, scale=30).getInfo()`
+   c. Extract LST value
+   ⚠️ To avoid N×1 getInfo() calls (slow), batch centroids into an ee.FeatureCollection of POINTS:
+   ```
+   points = []
+   for idx, row in ci_gdf.iterrows():
+       pt = ee.Geometry.Point([row['centroid_lon'], row['centroid_lat']])
+       points.append(ee.Feature(pt, {{'uid': str(row['uid'])}}))
+   fc_points = ee.FeatureCollection(points)
+   sampled = monsoon_lst_image.sampleRegions(collection=fc_points, scale=30, geometries=False)
+   results = sampled.getInfo()['features']
+   ```
+   This does a SINGLE getInfo() call for all centroids.
+10. Parse results → DataFrame with uid + mean_monsoon_lst
+11. Merge with ci_gdf on uid
+12. Build scatter plot:
+    - X-axis: Mean Monsoon LST (°C)
+    - Y-axis: Mean Cropping Intensity (%)
+    - Add trend line (linear regression) + Pearson r in title
+    - Annotate outlier points with MWS `uid`
+13. Export: scatter plot PNG to `./exports/lst_vs_ci_scatter.png`
+14. Export: merged data as GeoJSON to `./exports/lst_vs_cropping_intensity.geojson`
+
+⚠️ IMPORTANT NOTES:
+- Landsat 8 data starts from 2013, but CoreStack CI starts from 2017. Use 2017-2023 overlap.
+- Some centroids may fall on masked pixels → NaN LST. Drop those MWS from the plot.
+- NEVER pass polygon geometries to GEE — use POINT centroids only.
+- NEVER reference MWS IDs in GEE calls — GEE only works with coordinates.
+- The `sampleRegions` approach is efficient: 1 server call for all 115 MWS points.
+- ⚠️ LOCATION: ALWAYS include location in fetch_corestack_data call.
+
+**Query Type 14: "Find regions with similar phenological cycles to a target MWS — per-month phenological stage detection"**
+This query uses Sentinel-2 NDVI time series from GEE to detect phenological stages for each microwatershed (MWS),
+then identifies which MWS share the same phenological stage as a user-specified target MWS for each month.
+
+✅ DATA SOURCES:
+- **MWS Boundaries**: CoreStack vector layer with `uid` field and geometry (Admin Boundary or Cropping Intensity vector)
+- **NDVI**: Google Earth Engine — Sentinel-2 Surface Reflectance Harmonized (`COPERNICUS/S2_SR_HARMONIZED`)
+  - NDVI = (B8 - B4) / (B8 + B4)
+  - Cloud masking: `SCL` band — exclude values 3 (cloud shadow), 8 (cloud medium prob), 9 (cloud high prob), 10 (thin cirrus)
+  - Scale: 10m native resolution
+  - Monthly median composites for each month in the requested year range
+
+⛔ CoreStack has an NDVI Timeseries layer but it may not have the per-month granularity needed for phenological analysis.
+⛔ Use Sentinel-2 on GEE for monthly NDVI composites — MANDATORY.
+⛔ NEVER pass MWS polygon geometries to GEE — use CENTROID POINTS only.
+⛔ NEVER fabricate NDVI values. ALWAYS fetch real Sentinel-2 NDVI from GEE.
+
+🔴 MANDATORY: For this query type, COPY the code from EXAMPLE 12 below almost verbatim.
+
+⚠️ CRITICAL APPROACH — CENTROID-BASED MONTHLY NDVI + PHENOLOGICAL CLASSIFICATION:
+1. Get MWS boundaries from CoreStack (vector layer with uid + geometry)
+2. Verify the target MWS uid exists in the data
+3. Extract centroids from all MWS polygons → (lat, lon) per MWS
+4. Build MONTHLY median NDVI composites on GEE for each month in the requested years
+5. For EACH monthly composite, sample at all centroids using sampleRegions independently
+   ⚠️ DO NOT stack all months into one multi-band image — sampleRegions drops features where ANY band is null!
+   Instead, loop through 24 monthly images and call sampleRegions on each single-band image separately.
+   This ensures a cloudy month doesn't prevent data from other months.
+6. Parse each month's results into records: uid × month × NDVI
+7. Combine all records into a single DataFrame
+8. Compute temporal derivatives (delta NDVI month-to-month) and classify phenological stages
+9. Compare each MWS with target MWS per month to find phenological matches
+10. Export vector GeoJSON with monthly phenological stage + match info per MWS
+
+⚠️ PHENOLOGICAL STAGE CLASSIFICATION ALGORITHM:
+Based on NDVI magnitude and month-to-month change (delta = NDVI_current - NDVI_previous):
+- **Bare/Fallow**: NDVI < 0.15
+- **Dormant**: 0.15 ≤ NDVI < 0.25 and |delta| ≤ 0.03
+- **Green-up**: delta > 0.03 (vegetation actively increasing)
+- **Peak Vegetation**: NDVI ≥ 0.45 and |delta| ≤ 0.03
+- **Maturity**: 0.25 ≤ NDVI < 0.45 and |delta| ≤ 0.03 (stable mid-range)
+- **Senescence**: delta < -0.03 (vegetation declining)
+
+⚠️ CRITICAL LAYER NAME MATCHING:
+- Cropping Intensity (PRIMARY — has `uid` for MWS): `'cropping' in name.lower() and 'intensity' in name.lower()`
+- ⚠️ Do NOT use Admin Boundary for MWS data — it has village-level `vill_ID`, not MWS-level `uid`
+- ALWAYS print ALL vector layer names FIRST
+
+**METHODOLOGY:**
+1. Call fetch_corestack_data ONCE → get vector_layers list
+2. Print ALL layer names
+3. Find and load: Cropping Intensity vector as GeoDataFrame (EPSG:4326) — it has `uid` column for MWS identification
+   ⚠️ Do NOT use Admin Boundary — it has `vill_ID` (village-level) not `uid` (MWS-level)
+4. Verify target MWS uid (e.g., '18_16157') exists in the data
+5. Compute centroid lat/lon for each MWS polygon:
+   `mws_gdf['centroid_lon'] = mws_gdf.geometry.centroid.x`
+   `mws_gdf['centroid_lat'] = mws_gdf.geometry.centroid.y`
+6. Build ROI bounding box from total_bounds:
+   `minx, miny, maxx, maxy = mws_gdf.total_bounds`
+   `ee_roi = ee.Geometry.Rectangle([minx, miny, maxx, maxy])`
+7. Initialize Earth Engine: `ee.Initialize(project='corestack-gee')`
+8. For each month in each requested year (e.g., 2019-2020):
+   ⚠️ SKIP months July (7) and August (8) — Indian monsoon has ZERO cloud-free Sentinel-2 imagery.
+   This means for 2019-2020 you process 20 months, NOT 24.
+   a. Filter Sentinel-2 SR Harmonized to that month+year within ROI
+   b. Pre-filter by cloud percentage: `.filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 30))`
+   c. Take median composite: `.median()`
+   d. Compute NDVI directly on composite: `.normalizedDifference(['B8', 'B4'])`
+   ⚠️ DO NOT use .map() with custom Python functions — it fails with "mapped function's arguments cannot be used in client-side operations"
+   ⚠️ Instead of SCL cloud masking via .map(), use CLOUDY_PIXEL_PERCENTAGE metadata filter
+   e. Rename band to `NDVI_YYYY_MM`
+9. Build ee.FeatureCollection of CENTROID POINTS (with uid property)
+10. For EACH monthly image, call sampleRegions independently (20 separate calls for 2 years)
+    ⚠️ DO NOT stack bands — multi-band sampleRegions drops features where ANY band is null
+11. Each sampleRegions call returns ~115 features with one NDVI value → accumulate into records list
+12. Parse results → DataFrame with uid + NDVI per month
+13. Compute temporal derivative (delta NDVI) per MWS between consecutive months
+14. Classify phenological stage per MWS per month using thresholds above
+15. Get target MWS stages and compare with all other MWS per month
+16. Compute similarity score: % of months where phenological stage matches target
+17. Build output: wide-format DataFrame with stage_YYYY_MM, matches_YYYY_MM columns per MWS
+18. Export: GeoJSON with all attributes to `./exports/phenological_stages_<location>.geojson`
+19. Export: heatmap PNG showing phenological stages per MWS per month to `./exports/phenological_stages_heatmap.png`
+
+⚠️ IMPORTANT NOTES:
+- Sentinel-2 available from mid-2015, so 2019-2020 has good coverage.
+- ⚠️ ALWAYS SKIP months 7 (July) and 8 (August) — Indian monsoon produces ZERO cloud-free scenes. Do NOT waste GEE calls on them.
+- If a month has zero cloud-free scenes for a centroid, that band returns null → handle as NaN.
+- Use scale=10 for Sentinel-2 (10m native resolution for B4 and B8 bands).
+- Wrap each sampleRegions().getInfo() in try/except to handle GEE errors gracefully.
+- sampleRegions with multi-band image returns ALL band values per point → very efficient.
+- NEVER pass polygon geometries to GEE — use POINT centroids only.
+- ⚠️ LOCATION: ALWAYS include location in fetch_corestack_data call.
+
+═══════════════════════════════════════════════════════════════════════════════
+
+**Query Type 15: "Scatterplot of runoff accumulation per phenological stage vs cropping intensity"**
+This query builds on Query Type 14's phenological output. For each MWS and each detected phenological stage,
+it accumulates the runoff (from Drought vector `rd` columns) over the months belonging to that stage,
+and plots it against the average cropping intensity of that MWS for the corresponding year(s).
+
+✅ DATA SOURCES (ALL from CoreStack — no GEE needed):
+- **Phenological stages GeoJSON**: `./exports/phenological_stages_navalgund.geojson` (output of Query 14)
+  Contains `stage_YYYY_MM` columns per MWS, indicating the phenological stage per month.
+- **Drought vector** (115 MWS, ~258 cols): has weekly `rd` columns (format: `rdYY-M-D`)
+  These are weekly monsoon-season water-balance departure values per MWS (mm).
+  Positive = surplus (runoff potential), negative = deficit.
+- **Cropping Intensity vector** (115 MWS, 54 cols): has `cropping_intensity_YYYY` columns (2017-2024).
+
+🔴 MANDATORY: For this query type, COPY the code from EXAMPLE 13 below almost verbatim.
+
+**DATA COLUMNS:**
+- Phenological GeoJSON: `stage_2019_01`, `stage_2019_02`, ..., `stage_2020_12` (monthly phenological stages)
+- Drought `rd` columns: `rdYY-M-D` (e.g., `rd19-5-21`). Pattern: `rdYY-M-D` where YY = 2-digit year.
+  Dates parsed as: `2000 + int(YY)`, month = int(M), day = int(D).
+  Map each `rd` column to its nearest month → group by year+month → sum per month per MWS.
+- Cropping Intensity: `cropping_intensity_2019`, `cropping_intensity_2020` for the relevant years.
+
+**METHODOLOGY:**
+1. Read `./exports/phenological_stages_navalgund.geojson` → GeoDataFrame with `uid`, `stage_YYYY_MM` columns.
+2. Call fetch_corestack_data ONCE → get Drought vector + Cropping Intensity vector.
+3. Print ALL layer names, load both layers as GeoDataFrames.
+4. Parse ALL `rd` columns from Drought vector:
+   a. For each `rdYY-M-D` column, extract year=2000+int(YY), month=int(M).
+   b. Group columns by (year, month).
+   c. For each (year, month) group, compute the SUM of `rd` values → monthly runoff per MWS (mm).
+5. Build a long-format DataFrame: uid × year × month × monthly_runoff_mm.
+6. Merge with the phenological stages from step 1 (join on uid + year + month).
+7. For each unique (uid, year, phenological_stage) combination:
+   a. Sum the monthly_runoff_mm across all months of that stage → runoff_accumulation_mm per stage.
+8. Get cropping intensity per MWS per year from CI vector (`cropping_intensity_YYYY`).
+9. Merge runoff_accumulation with CI per MWS per year.
+10. Build scatterplot:
+    - X-axis: Runoff Accumulation (mm) during phenological stage
+    - Y-axis: Cropping Intensity (%) for that year
+    - Color by phenological stage (Bare/Fallow, Dormant, Green-up, Maturity, Peak Vegetation, Senescence)
+    - Annotate with legend showing stage colors + count per stage
+    - Title: "Runoff Accumulation per Phenological Stage vs Cropping Intensity — Navalgund"
+11. Export scatter plot PNG to `./exports/runoff_vs_ci_by_phenostage.png`
+12. Export merged data as GeoJSON to `./exports/runoff_vs_ci_by_phenostage.geojson`
+
+⚠️ IMPORTANT NOTES:
+- The `rd` columns cover monsoon/post-monsoon weeks (roughly May-Oct for years 2017-2022).
+  NOT all 12 months have corresponding `rd` data — only months with `rd` columns contribute to runoff.
+  For months without `rd` data, runoff contribution is 0.
+- `rd` column date format: `rdYY-M-D` (e.g., `rd19-6-17` = 2019-06-17). Extract month to map to phenological month.
+- Phenological stage GeoJSON has `stage_YYYY_MM` columns. Parse YYYY and MM from column name to match.
+- Each scatter point represents ONE (MWS, year, phenological_stage) combination.
+- Some stages may have zero runoff (e.g., non-monsoon stages with no `rd` columns).
+- ⚠️ LOCATION: ALWAYS include location in fetch_corestack_data call.
+
+═══════════════════════════════════════════════════════════════════════════════
+
 Instructions:
 1. **CORESTACK PRIORITY (PRIMARY)**: For ANY query about India or Indian locations, you MUST call fetch_corestack_data FIRST to access CoreStack database. Available CoreStack layers:
    - Raster: {', '.join(CORESTACK_DATA_PRODUCTS['raster_layers'])}
@@ -2193,13 +2432,620 @@ For multi-region layers: Read ALL URLs, concat GeoDataFrames, then analyze.
 		export_gdf.to_file('./exports/ci_vs_runoff_quadrants.geojson', driver='GeoJSON')
 		print(f"GeoJSON exported to ./exports/ci_vs_runoff_quadrants.geojson")
 
+		# ╔══════════════════════════════════════════════════════════════╗
+		# ║ EXAMPLE 11: MONSOON LST vs CROPPING INTENSITY SCATTER      ║
+		# ║ ⚠️ For Query Type 13, COPY THIS CODE ALMOST VERBATIM.       ║
+		# ║ Fetches CI from CoreStack, LST from GEE Landsat 8          ║
+		# ║ Uses CENTROID lat/lon for GEE sampling (NOT polygon IDs)   ║
+		# ╚══════════════════════════════════════════════════════════════╝
+		import os, json
+		os.makedirs('./exports', exist_ok=True)
+
+		# Step 1: Fetch data from CoreStack
+		result = fetch_corestack_data(query="Navalgund Dharwad Karnataka cropping intensity")
+		data = json.loads(result)
+		vector_layers = data['spatial_data']['vector_layers']
+
+		print("Available vector layers:")
+		for layer in vector_layers:
+			print(f"  - {{layer['layer_name']}}")
+
+		# Step 2: Load Cropping Intensity layer ONLY (no admin boundary needed)
+		import geopandas as gpd
+		import pandas as pd
+		ci_gdf = None
+		for layer in vector_layers:
+			lname = layer['layer_name'].lower()
+			if 'cropping' in lname and 'intensity' in lname and ci_gdf is None:
+				print(f"Found Cropping Intensity layer: {{layer['layer_name']}}")
+				ci_gdf = pd.concat([gpd.read_file(u['url']) for u in layer['urls']], ignore_index=True).to_crs('EPSG:4326')
+
+		print(f"CI shape: {{ci_gdf.shape}}, columns: {{ci_gdf.columns.tolist()}}")
+
+		# Step 3: Compute mean cropping intensity per MWS (average over 2017-2023)
+		ci_cols = [c for c in ci_gdf.columns if c.startswith('cropping_intensity_')]
+		ci_cols_filtered = [c for c in ci_cols if int(c.split('_')[-1]) >= 2017 and int(c.split('_')[-1]) <= 2023]
+		ci_gdf['mean_ci'] = ci_gdf[ci_cols_filtered].mean(axis=1)
+		print(f"CI year columns used: {{ci_cols_filtered}}")
+		print(f"Mean CI range: {{ci_gdf['mean_ci'].min():.1f}} to {{ci_gdf['mean_ci'].max():.1f}}")
+
+		# Step 4: Extract centroid lat/lon from each MWS polygon
+		ci_gdf['centroid_lon'] = ci_gdf.geometry.centroid.x
+		ci_gdf['centroid_lat'] = ci_gdf.geometry.centroid.y
+		print(f"Centroid lon range: {{ci_gdf['centroid_lon'].min():.4f}} to {{ci_gdf['centroid_lon'].max():.4f}}")
+		print(f"Centroid lat range: {{ci_gdf['centroid_lat'].min():.4f}} to {{ci_gdf['centroid_lat'].max():.4f}}")
+
+		# Step 5: Initialize Earth Engine and build ROI bounding box from CI data extent
+		import ee
+		ee.Initialize(project='corestack-gee')
+
+		minx, miny, maxx, maxy = ci_gdf.total_bounds
+		ee_roi = ee.Geometry.Rectangle([float(minx), float(miny), float(maxx), float(maxy)])
+		print(f"GEE ROI bounding box: [{{minx:.4f}}, {{miny:.4f}}, {{maxx:.4f}}, {{maxy:.4f}}]")
+
+		# Step 6: Cloud masking function for Landsat 8 C2L2
+		def cloud_mask_l8(image):
+			qa = image.select('QA_PIXEL')
+			cloud = qa.bitwiseAnd(1 << 3).eq(0)
+			shadow = qa.bitwiseAnd(1 << 4).eq(0)
+			return image.updateMask(cloud.And(shadow))
+
+		# Step 7: LST computation function (ST_B10 -> Celsius)
+		def compute_lst(image):
+			lst = image.select('ST_B10').multiply(0.00341802).add(149.0).subtract(273.15)
+			return lst.rename('LST').copyProperties(image, ['system:time_start'])
+
+		# Step 8: Build a SINGLE mean monsoon LST composite across ALL years (2017-2023)
+		all_monsoon_images = ee.ImageCollection('LANDSAT/LC08/C02/T1_L2') \
+			.filterBounds(ee_roi) \
+			.filter(ee.Filter.calendarRange(6, 9, 'month')) \
+			.filterDate('2017-01-01', '2023-12-31') \
+			.map(cloud_mask_l8) \
+			.map(compute_lst)
+
+		scene_count = all_monsoon_images.size().getInfo()
+		print(f"Total Landsat 8 monsoon scenes (2017-2023): {{scene_count}}")
+
+		# Single mean composite across all monsoon scenes
+		monsoon_lst_mean = all_monsoon_images.mean()
+
+		# Step 9: Build ee.FeatureCollection of CENTROID POINTS (not polygons!)
+		points = []
+		for idx, row in ci_gdf.iterrows():
+			lon = float(row['centroid_lon'])
+			lat = float(row['centroid_lat'])
+			pt = ee.Geometry.Point([lon, lat])
+			points.append(ee.Feature(pt, {{'uid': str(row['uid'])}}))
+		fc_points = ee.FeatureCollection(points)
+		print(f"Created {{len(points)}} centroid points for GEE sampling")
+
+		# Step 10: Sample the mean LST image at all centroid points (SINGLE GEE call)
+		sampled = monsoon_lst_mean.sampleRegions(
+			collection=fc_points,
+			scale=30,
+			geometries=False
+		)
+		sampled_info = sampled.getInfo()
+		result_features = sampled_info['features']
+		print(f"GEE returned {{len(result_features)}} sampled points")
+
+		# Step 11: Parse GEE results into DataFrame
+		import numpy as np
+		lst_records = []
+		for feat in result_features:
+			props = feat['properties']
+			uid = props.get('uid')
+			lst_val = props.get('LST')
+			if uid is not None and lst_val is not None:
+				if not np.isnan(lst_val):
+					lst_records.append({{'uid': str(uid), 'mean_monsoon_lst': float(lst_val)}})
+
+		lst_df = pd.DataFrame(lst_records)
+		print(f"Valid LST values extracted: {{len(lst_df)}}")
+		if len(lst_df) > 0:
+			print(f"LST range: {{lst_df['mean_monsoon_lst'].min():.2f}} to {{lst_df['mean_monsoon_lst'].max():.2f}} °C")
+
+		# Step 12: Merge LST with CI on uid
+		ci_gdf['uid'] = ci_gdf['uid'].astype(str)
+		merged = ci_gdf[['uid', 'mean_ci', 'geometry']].merge(lst_df, on='uid', how='inner')
+		merged = merged.dropna(subset=['mean_ci', 'mean_monsoon_lst'])
+		print(f"Merged MWS count: {{len(merged)}}")
+
+		# Step 13: Build scatter plot
+		import matplotlib
+		matplotlib.use('Agg')
+		import matplotlib.pyplot as plt
+		from scipy import stats
+
+		fig, ax = plt.subplots(figsize=(14, 10))
+		ax.scatter(merged['mean_monsoon_lst'], merged['mean_ci'],
+				s=70, alpha=0.7, edgecolors='black', linewidth=0.5, c='darkorange')
+
+		# Annotate each point with MWS uid
+		for _, row in merged.iterrows():
+			ax.annotate(row['uid'], (row['mean_monsoon_lst'], row['mean_ci']),
+					fontsize=5, alpha=0.7, ha='left', va='bottom',
+					xytext=(3, 3), textcoords='offset points')
+
+		# Add trend line
+		slope, intercept, r_value, p_value, std_err = stats.linregress(
+			merged['mean_monsoon_lst'], merged['mean_ci'])
+		x_line = np.linspace(merged['mean_monsoon_lst'].min(), merged['mean_monsoon_lst'].max(), 100)
+		ax.plot(x_line, slope * x_line + intercept, 'r--', linewidth=1.5,
+				label=f'Trend (r={{r_value:.3f}}, p={{p_value:.3f}})')
+
+		ax.set_xlabel('Mean Monsoon Land Surface Temperature (°C)', fontsize=12)
+		ax.set_ylabel('Mean Cropping Intensity (%)', fontsize=12)
+		ax.set_title(f'Monsoon LST vs Cropping Intensity per Microwatershed\nNavalgund, Dharwad, Karnataka (2017–2023) | Pearson r={{r_value:.3f}}', fontsize=13)
+		ax.legend(fontsize=10)
+		ax.grid(True, alpha=0.3)
+		plt.tight_layout()
+		plt.savefig('./exports/lst_vs_ci_scatter.png', dpi=200, bbox_inches='tight')
+		print(f"Scatter plot saved to ./exports/lst_vs_ci_scatter.png")
+
+		# Step 14: Export merged data as GeoJSON
+		export_gdf = gpd.GeoDataFrame(merged, geometry='geometry')
+		export_gdf.to_file('./exports/lst_vs_cropping_intensity.geojson', driver='GeoJSON')
+		print(f"GeoJSON exported to ./exports/lst_vs_cropping_intensity.geojson")
+
+		# ╔══════════════════════════════════════════════════════════════╗
+		# ║ EXAMPLE 12: PHENOLOGICAL STAGE DETECTION & SIMILARITY      ║
+		# ║ ⚠️ For Query Type 14, COPY THIS CODE ALMOST VERBATIM.       ║
+		# ║ Uses Sentinel-2 NDVI from GEE + MWS boundaries from CS    ║
+		# ║ Centroid-based monthly NDVI → phenological classification  ║
+		# ╚══════════════════════════════════════════════════════════════╝
+		import os, json
+		os.makedirs('./exports', exist_ok=True)
+
+		# Step 1: Fetch data from CoreStack
+		result = fetch_corestack_data(query="Navalgund Dharwad Karnataka admin boundary cropping intensity")
+		data = json.loads(result)
+		vector_layers = data['spatial_data']['vector_layers']
+
+		print("Available vector layers:")
+		for layer in vector_layers:
+			print(f"  - {{layer['layer_name']}}")
+
+		# Step 2: Load MWS boundary layer — use Cropping Intensity (has 'uid' column for MWS identification)
+		import geopandas as gpd
+		import pandas as pd
+		import numpy as np
+		mws_gdf = None
+		for layer in vector_layers:
+			lname = layer['layer_name'].lower()
+			if 'cropping' in lname and 'intensity' in lname and mws_gdf is None:
+				print(f"Found Cropping Intensity layer: {{layer['layer_name']}}")
+				mws_gdf = pd.concat([gpd.read_file(u['url']) for u in layer['urls']], ignore_index=True).to_crs('EPSG:4326')
+
+		print(f"MWS shape: {{mws_gdf.shape}}, columns: {{mws_gdf.columns.tolist()}}")
+
+		# Step 3: Verify target MWS exists
+		TARGET_UID = '18_16157'
+		mws_gdf['uid'] = mws_gdf['uid'].astype(str)
+		assert TARGET_UID in mws_gdf['uid'].values, f"Target MWS {{TARGET_UID}} not found!"
+		print(f"Target MWS {{TARGET_UID}} found in dataset with {{len(mws_gdf)}} total MWS")
+
+		# Step 4: Extract centroid lat/lon from each MWS polygon
+		mws_gdf['centroid_lon'] = mws_gdf.geometry.centroid.x
+		mws_gdf['centroid_lat'] = mws_gdf.geometry.centroid.y
+		print(f"Centroid lon range: {{mws_gdf['centroid_lon'].min():.4f}} to {{mws_gdf['centroid_lon'].max():.4f}}")
+		print(f"Centroid lat range: {{mws_gdf['centroid_lat'].min():.4f}} to {{mws_gdf['centroid_lat'].max():.4f}}")
+
+		# Step 5: Initialize Earth Engine and build ROI bounding box
+		import ee
+		ee.Initialize(project='corestack-gee')
+		minx, miny, maxx, maxy = mws_gdf.total_bounds
+		ee_roi = ee.Geometry.Rectangle([float(minx), float(miny), float(maxx), float(maxy)])
+		print(f"GEE ROI bounding box: [{{minx:.4f}}, {{miny:.4f}}, {{maxx:.4f}}, {{maxy:.4f}}]")
+
+		# Step 6: Cloud masking and NDVI computation
+		# ⚠️ DO NOT use .map() with custom Python functions — it fails in the smolagents executor
+		# ⚠️ ("A mapped function's arguments cannot be used in client-side operations")
+		# Instead: pre-filter by cloud percentage, take median composite, then compute NDVI directly
+
+		# Step 7: Build monthly NDVI composites and sample EACH MONTH INDEPENDENTLY
+		# ⚠️ DO NOT stack all bands into one image — sampleRegions drops features where ANY band is null!
+		# Instead, sample each monthly single-band image separately to preserve all centroids.
+		YEARS = [2019, 2020]
+
+		# Step 9: Build ee.FeatureCollection of centroid points FIRST
+		points = []
+		for idx, row in mws_gdf.iterrows():
+			pt = ee.Geometry.Point([float(row['centroid_lon']), float(row['centroid_lat'])])
+			points.append(ee.Feature(pt, {{'uid': str(row['uid'])}}))
+		fc_points = ee.FeatureCollection(points)
+		print(f"Created {{len(points)}} centroid points for GEE sampling")
+
+		# Step 9: For each month, compute median NDVI and sample at centroids independently
+		# ⚠️ Skip months 7 (July) and 8 (August) — Indian monsoon means zero cloud-free Sentinel-2 images
+		MONTHS_TO_SKIP = [7, 8]
+		records = []
+		for year in YEARS:
+			for month in range(1, 13):
+				if month in MONTHS_TO_SKIP:
+					print(f"  NDVI_{{year}}_{{month:02d}}: Skipped (monsoon — no cloud-free imagery)")
+					continue
+				start_date = f'{{year}}-{{month:02d}}-01'
+				if month == 12:
+					end_date = f'{{year + 1}}-01-01'
+				else:
+					end_date = f'{{year}}-{{month + 1:02d}}-01'
+
+				# Pre-filter by cloud percentage (NO .map() needed)
+				collection = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED') \
+					.filterBounds(ee_roi) \
+					.filterDate(start_date, end_date) \
+					.filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 30))
+
+				# Compute NDVI directly on the median composite (no .map() call)
+				band_name = f'NDVI_{{year}}_{{month:02d}}'
+				composite = collection.median()
+				ndvi_img = composite.normalizedDifference(['B8', 'B4']).rename(band_name)
+
+				# Sample THIS month at all centroids (independent call — no null dropout)
+				sampled = ndvi_img.sampleRegions(collection=fc_points, scale=10, geometries=False)
+				try:
+					result_features = sampled.getInfo()['features']
+				except Exception as e:
+					print(f"  {{band_name}}: GEE error — {{e}}")
+					continue
+
+				count = 0
+				for feat in result_features:
+					props = feat['properties']
+					uid = props.get('uid')
+					ndvi_val = props.get(band_name)
+					if uid is not None and ndvi_val is not None:
+						try:
+							if not np.isnan(float(ndvi_val)):
+								records.append({{'uid': str(uid), 'year': year, 'month': month, 'ndvi': float(ndvi_val)}})
+								count += 1
+						except (ValueError, TypeError):
+							pass
+				print(f"  {{band_name}}: {{count}}/{{len(points)}} centroids sampled")
+
+		ndvi_df = pd.DataFrame(records)
+		print(f"\nTotal NDVI records: {{len(ndvi_df)}}")
+		print(f"MWS with data: {{ndvi_df['uid'].nunique()}}")
+		print(f"NDVI range: {{ndvi_df['ndvi'].min():.3f}} to {{ndvi_df['ndvi'].max():.3f}}")
+
+		# Step 12: Compute temporal derivative and classify phenological stages
+		ndvi_df = ndvi_df.sort_values(['uid', 'year', 'month']).reset_index(drop=True)
+		ndvi_df['ndvi_prev'] = ndvi_df.groupby('uid')['ndvi'].shift(1)
+		ndvi_df['delta'] = ndvi_df['ndvi'] - ndvi_df['ndvi_prev']
+
+		def classify_pheno(row):
+			ndvi = row['ndvi']
+			delta = row['delta'] if not pd.isna(row['delta']) else 0
+			if ndvi < 0.15:
+				return 'Bare/Fallow'
+			elif ndvi < 0.25:
+				if delta > 0.03:
+					return 'Green-up'
+				elif delta < -0.03:
+					return 'Senescence'
+				else:
+					return 'Dormant'
+			elif ndvi < 0.45:
+				if delta > 0.03:
+					return 'Green-up'
+				elif delta < -0.03:
+					return 'Senescence'
+				else:
+					return 'Maturity'
+			else:
+				if delta > 0.03:
+					return 'Green-up'
+				elif delta < -0.03:
+					return 'Senescence'
+				else:
+					return 'Peak Vegetation'
+
+		ndvi_df['pheno_stage'] = ndvi_df.apply(classify_pheno, axis=1)
+		print(f"\nPhenological stage distribution:")
+		print(ndvi_df['pheno_stage'].value_counts())
+
+		# Step 13: Get target MWS stages and find matches
+		target_stages = ndvi_df[ndvi_df['uid'] == TARGET_UID][['year', 'month', 'pheno_stage']].rename(
+			columns={{'pheno_stage': 'target_stage'}})
+		print(f"\nTarget MWS {{TARGET_UID}} phenological stages:")
+		for _, row in target_stages.iterrows():
+			print(f"  {{row['year']}}-{{row['month']:02d}}: {{row['target_stage']}}")
+
+		# Merge to find matches per month
+		ndvi_df = ndvi_df.merge(target_stages, on=['year', 'month'], how='left')
+		ndvi_df['matches_target'] = ndvi_df['pheno_stage'] == ndvi_df['target_stage']
+
+		# Step 14: Build wide-format output for GeoJSON export
+		pivot_stage = ndvi_df.pivot_table(index='uid', columns=['year', 'month'], values='pheno_stage', aggfunc='first')
+		pivot_match = ndvi_df.pivot_table(index='uid', columns=['year', 'month'], values='matches_target', aggfunc='first')
+
+		stage_cols = {{}}
+		match_cols = {{}}
+		for (year_v, month_v) in pivot_stage.columns:
+			stage_cols[f'stage_{{year_v}}_{{month_v:02d}}'] = pivot_stage[(year_v, month_v)]
+			match_cols[f'match_{{year_v}}_{{month_v:02d}}'] = pivot_match[(year_v, month_v)]
+
+		wide_df = pd.DataFrame(stage_cols)
+		wide_df = wide_df.join(pd.DataFrame(match_cols))
+		wide_df['uid'] = wide_df.index
+		wide_df.reset_index(drop=True, inplace=True)
+
+		# Compute similarity score
+		match_columns = [c for c in wide_df.columns if c.startswith('match_')]
+		wide_df['months_matching'] = wide_df[match_columns].sum(axis=1).astype(int)
+		wide_df['similarity_pct'] = (wide_df['months_matching'] / len(match_columns) * 100).round(1)
+
+		# Merge with geometry
+		export_gdf = mws_gdf[['uid', 'geometry']].merge(wide_df, on='uid', how='inner')
+		export_gdf = gpd.GeoDataFrame(export_gdf, geometry='geometry')
+
+		print(f"\nMWS with >= 50% phenological similarity to {{TARGET_UID}}:")
+		similar = export_gdf[export_gdf['similarity_pct'] >= 50].sort_values('similarity_pct', ascending=False)
+		for _, row in similar.iterrows():
+			print(f"  {{row['uid']}}: {{row['similarity_pct']}}% match ({{row['months_matching']}}/{{len(match_columns)}} months)")
+
+		# Step 15: Export GeoJSON
+		export_gdf.to_file('./exports/phenological_stages_navalgund.geojson', driver='GeoJSON')
+		print(f"\nGeoJSON exported to ./exports/phenological_stages_navalgund.geojson")
+
+		# Step 16: Heatmap visualization of phenological stages
+		import matplotlib
+		matplotlib.use('Agg')
+		import matplotlib.pyplot as plt
+		from matplotlib.colors import ListedColormap, BoundaryNorm
+		from matplotlib.patches import Patch
+
+		stage_order = ['Bare/Fallow', 'Dormant', 'Green-up', 'Maturity', 'Peak Vegetation', 'Senescence']
+		stage_to_num = {{s: i for i, s in enumerate(stage_order)}}
+		colors = ['#8B4513', '#D2B48C', '#90EE90', '#FFD700', '#006400', '#FF8C00']
+
+		# Build matrix: rows = top MWS sorted by similarity, cols = months
+		sorted_uids = export_gdf.sort_values('similarity_pct', ascending=False)['uid'].tolist()
+		if TARGET_UID in sorted_uids:
+			sorted_uids.remove(TARGET_UID)
+			sorted_uids = [TARGET_UID] + sorted_uids
+
+		stage_col_names = sorted([c for c in wide_df.columns if c.startswith('stage_')])
+		matrix = []
+		display_uids = []
+		for uid in sorted_uids[:30]:  # Top 30 for readability
+			uid_row = wide_df[wide_df['uid'] == uid]
+			if len(uid_row) == 0:
+				continue
+			row_data = []
+			for col in stage_col_names:
+				stage = uid_row.iloc[0][col]
+				row_data.append(stage_to_num.get(stage, -1))
+			matrix.append(row_data)
+			display_uids.append(uid)
+
+		if len(matrix) > 0:
+			fig, ax = plt.subplots(figsize=(18, max(8, len(display_uids) * 0.35)))
+			cmap = ListedColormap(colors)
+			bounds = list(range(len(stage_order) + 1))
+			norm = BoundaryNorm(bounds, cmap.N)
+
+			im = ax.imshow(matrix, cmap=cmap, norm=norm, aspect='auto')
+			ax.set_yticks(range(len(display_uids)))
+			ax.set_yticklabels(display_uids, fontsize=6)
+
+			month_labels = [c.replace('stage_', '').replace('_', '-') for c in stage_col_names]
+			ax.set_xticks(range(len(stage_col_names)))
+			ax.set_xticklabels(month_labels, fontsize=7, rotation=45, ha='right')
+
+			ax.set_xlabel('Month', fontsize=11)
+			ax.set_ylabel('Microwatershed UID', fontsize=11)
+			ax.set_title(f'Phenological Stages per Microwatershed\nNavalgund, Dharwad, Karnataka (2019-2020)\nTarget: {{TARGET_UID}} (top row)', fontsize=12)
+
+			legend_elements = [Patch(facecolor=colors[i], label=stage_order[i]) for i in range(len(stage_order))]
+			ax.legend(handles=legend_elements, loc='upper left', bbox_to_anchor=(1.02, 1), fontsize=7, title='Stage')
+
+			plt.tight_layout()
+			plt.savefig('./exports/phenological_stages_heatmap.png', dpi=200, bbox_inches='tight')
+			print(f"Heatmap saved to ./exports/phenological_stages_heatmap.png")
+
+		final_answer(f"Phenological stage analysis complete for {{len(export_gdf)}} microwatersheds.\nTarget MWS: {{TARGET_UID}}\nMWS with >=50% similarity: {{len(similar)}}\nExports:\n- Vector: ./exports/phenological_stages_navalgund.geojson\n- Heatmap: ./exports/phenological_stages_heatmap.png")
+
+		# ╔══════════════════════════════════════════════════════════════╗
+		# ║ EXAMPLE 13: RUNOFF ACCUMULATION per PHENOLOGICAL STAGE     ║
+		# ║            vs CROPPING INTENSITY — SCATTER PLOT            ║
+		# ║ ⚠️ For Query Type 15, COPY THIS CODE ALMOST VERBATIM.       ║
+		# ║ Loads Query 14 phenological output + Drought + CI vectors  ║
+		# ╚══════════════════════════════════════════════════════════════╝
+		import os, json, re
+		os.makedirs('./exports', exist_ok=True)
+
+		# Step 1: Load phenological stage GeoJSON from Query 14 output
+		import geopandas as gpd
+		import pandas as pd
+		import numpy as np
+		pheno_gdf = gpd.read_file('./exports/phenological_stages_navalgund.geojson')
+		pheno_gdf['uid'] = pheno_gdf['uid'].astype(str)
+		print(f"Loaded phenological GeoJSON: {{pheno_gdf.shape[0]}} MWS, {{pheno_gdf.shape[1]}} columns")
+
+		# Extract stage columns → long format: uid, year, month, stage
+		stage_cols = sorted([c for c in pheno_gdf.columns if c.startswith('stage_')])
+		print(f"Stage columns found: {{len(stage_cols)}}")
+		pheno_records = []
+		for _, row in pheno_gdf.iterrows():
+			uid = row['uid']
+			for sc in stage_cols:
+				# Parse stage_YYYY_MM
+				parts = sc.replace('stage_', '').split('_')
+				year_val = int(parts[0])
+				month_val = int(parts[1])
+				stage = row[sc]
+				if pd.notna(stage) and isinstance(stage, str) and stage != 'Unknown':
+					pheno_records.append({{'uid': uid, 'year': year_val, 'month': month_val, 'stage': stage}})
+		pheno_df = pd.DataFrame(pheno_records)
+		print(f"Phenological records: {{len(pheno_df)}}")
+		print(f"Unique stages: {{pheno_df['stage'].value_counts().to_dict()}}")
+
+		# Step 2: Fetch Drought + Cropping Intensity from CoreStack
+		result = fetch_corestack_data(query="Navalgund Dharwad Karnataka cropping intensity drought")
+		data = json.loads(result)
+		vector_layers = data['spatial_data']['vector_layers']
+
+		print("\nAvailable vector layers:")
+		for layer in vector_layers:
+			print(f"  - {{layer['layer_name']}}")
+
+		# Step 3: Load both layers
+		ci_gdf = None
+		drought_gdf = None
+		for layer in vector_layers:
+			lname = layer['layer_name'].lower()
+			if 'intensity' in lname and ci_gdf is None:
+				print(f"\nFound Cropping Intensity layer: {{layer['layer_name']}}")
+				ci_gdf = pd.concat([gpd.read_file(u['url']) for u in layer['urls']], ignore_index=True)
+			if 'drought' in lname and 'causal' not in lname and drought_gdf is None:
+				print(f"Found Drought layer: {{layer['layer_name']}}")
+				drought_gdf = pd.concat([gpd.read_file(u['url']) for u in layer['urls']], ignore_index=True)
+
+		ci_gdf['uid'] = ci_gdf['uid'].astype(str)
+		drought_gdf['uid'] = drought_gdf['uid'].astype(str)
+		print(f"CI shape: {{ci_gdf.shape}}")
+		print(f"Drought shape: {{drought_gdf.shape}}")
+
+		# Step 4: Parse rd columns → monthly runoff per MWS
+		# rd column format: rdYY-M-D → year = 2000+YY, month = M
+		rd_cols = [c for c in drought_gdf.columns if c.startswith('rd') and '-' in c]
+		print(f"\nTotal rd columns: {{len(rd_cols)}}")
+
+		# Map each rd column to (year, month)
+		rd_to_ym = {{}}
+		for c in rd_cols:
+			try:
+				parts = c[2:].split('-')  # "19-5-21" → ['19', '5', '21']
+				yr = 2000 + int(parts[0])
+				mo = int(parts[1])
+				if (yr, mo) not in rd_to_ym:
+					rd_to_ym[(yr, mo)] = []
+				rd_to_ym[(yr, mo)].append(c)
+			except (ValueError, IndexError):
+				pass
+
+		print(f"rd columns mapped to {{len(rd_to_ym)}} (year, month) groups")
+		for (yr, mo), cols in sorted(rd_to_ym.items()):
+			print(f"  {{yr}}-{{mo:02d}}: {{len(cols)}} weekly columns")
+
+		# Step 5: Compute monthly runoff (sum of rd values) per MWS per (year, month)
+		runoff_records = []
+		for (yr, mo), cols in sorted(rd_to_ym.items()):
+			monthly_sum = drought_gdf[cols].sum(axis=1)
+			for idx, row in drought_gdf.iterrows():
+				uid = row['uid']
+				area_ha = float(row.get('area_in_ha', 1))
+				runoff_mm = float(monthly_sum.iloc[idx] if hasattr(idx, '__index__') else monthly_sum.loc[idx])
+				runoff_records.append({{'uid': uid, 'year': yr, 'month': mo, 'runoff_mm': runoff_mm, 'area_in_ha': area_ha}})
+
+		runoff_df = pd.DataFrame(runoff_records)
+		print(f"\nMonthly runoff records: {{len(runoff_df)}}")
+
+		# Step 6: Merge phenological stages with runoff
+		merged = pheno_df.merge(runoff_df, on=['uid', 'year', 'month'], how='inner')
+		print(f"Merged pheno+runoff records: {{len(merged)}}")
+
+		if len(merged) == 0:
+			# Fallback: rd data only covers some years. Check overlap.
+			rd_years = set(runoff_df['year'].unique())
+			pheno_years = set(pheno_df['year'].unique())
+			print(f"rd data years: {{sorted(rd_years)}}")
+			print(f"Phenological years: {{sorted(pheno_years)}}")
+			print(f"Overlap years: {{sorted(rd_years & pheno_years)}}")
+
+		# Step 7: Accumulate runoff per (uid, year, stage)
+		# Sum runoff_mm across all months belonging to same stage for each MWS in each year
+		stage_runoff = merged.groupby(['uid', 'year', 'stage']).agg(
+			runoff_accum_mm=('runoff_mm', 'sum'),
+			area_in_ha=('area_in_ha', 'first'),
+			n_months=('month', 'count')
+		).reset_index()
+		print(f"\nStage-level runoff accumulation: {{len(stage_runoff)}} records")
+		print(f"Runoff range: {{stage_runoff['runoff_accum_mm'].min():.1f}} to {{stage_runoff['runoff_accum_mm'].max():.1f}} mm")
+
+		# Step 8: Get cropping intensity per MWS per year
+		ci_years = sorted(set(stage_runoff['year'].unique()))
+		ci_long_records = []
+		for yr in ci_years:
+			ci_col = f'cropping_intensity_{{yr}}'
+			if ci_col in ci_gdf.columns:
+				for _, row in ci_gdf.iterrows():
+					ci_long_records.append({{'uid': str(row['uid']), 'year': yr, 'ci_pct': float(row[ci_col])}})
+		ci_long_df = pd.DataFrame(ci_long_records)
+		print(f"CI records for years {{ci_years}}: {{len(ci_long_df)}}")
+
+		# Step 9: Merge runoff accumulation with CI
+		scatter_df = stage_runoff.merge(ci_long_df, on=['uid', 'year'], how='inner')
+		print(f"Final scatter data: {{len(scatter_df)}} points")
+		print(f"Stages represented: {{scatter_df['stage'].value_counts().to_dict()}}")
+
+		# Step 10: Build scatterplot — Runoff Accumulation vs CI, colored by phenological stage
+		import matplotlib
+		matplotlib.use('Agg')
+		import matplotlib.pyplot as plt
+
+		stage_colors = {{
+			'Bare/Fallow': '#8B4513',
+			'Dormant': '#D2B48C',
+			'Green-up': '#90EE90',
+			'Maturity': '#FFD700',
+			'Peak Vegetation': '#006400',
+			'Senescence': '#FF8C00'
+		}}
+
+		fig, ax = plt.subplots(figsize=(14, 10))
+		for stage, color in stage_colors.items():
+			subset = scatter_df[scatter_df['stage'] == stage]
+			if len(subset) > 0:
+				ax.scatter(subset['runoff_accum_mm'], subset['ci_pct'],
+						c=color, s=50, alpha=0.7, edgecolors='black', linewidth=0.3,
+						label=f'{{stage}} (n={{len(subset)}})')
+
+		ax.set_xlabel('Runoff Accumulation (mm) during Phenological Stage', fontsize=12)
+		ax.set_ylabel('Cropping Intensity (%)', fontsize=12)
+		ax.set_title('Runoff Accumulation per Phenological Stage vs Cropping Intensity\nNavalgund, Dharwad, Karnataka (2019-2020)', fontsize=13)
+		ax.legend(fontsize=9, loc='upper left', title='Phenological Stage')
+		ax.grid(True, alpha=0.3)
+
+		# Add trend line across all points
+		from numpy.polynomial.polynomial import polyfit
+		valid = scatter_df.dropna(subset=['runoff_accum_mm', 'ci_pct'])
+		if len(valid) > 2:
+			coeffs = np.polyfit(valid['runoff_accum_mm'], valid['ci_pct'], 1)
+			x_line = np.linspace(valid['runoff_accum_mm'].min(), valid['runoff_accum_mm'].max(), 100)
+			y_line = np.polyval(coeffs, x_line)
+			r = np.corrcoef(valid['runoff_accum_mm'], valid['ci_pct'])[0, 1]
+			ax.plot(x_line, y_line, 'k--', alpha=0.5, linewidth=1.5, label=f'Trend (r={{r:.3f}})')
+			ax.legend(fontsize=9, loc='upper left', title='Phenological Stage')
+
+		plt.tight_layout()
+		plt.savefig('./exports/runoff_vs_ci_by_phenostage.png', dpi=200, bbox_inches='tight')
+		print(f"\nScatter plot saved to ./exports/runoff_vs_ci_by_phenostage.png")
+
+		# Step 11: Export GeoJSON
+		# Pivot stage_runoff to wide format per MWS
+		export_base = scatter_df.groupby('uid').agg(
+			mean_runoff_accum=('runoff_accum_mm', 'mean'),
+			total_runoff_accum=('runoff_accum_mm', 'sum'),
+			mean_ci=('ci_pct', 'mean'),
+			n_stages=('stage', 'nunique')
+		).reset_index()
+		export_gdf = pheno_gdf[['uid', 'geometry']].merge(export_base, on='uid', how='inner')
+		export_gdf = gpd.GeoDataFrame(export_gdf, geometry='geometry')
+		export_gdf.to_file('./exports/runoff_vs_ci_by_phenostage.geojson', driver='GeoJSON')
+		print(f"GeoJSON exported to ./exports/runoff_vs_ci_by_phenostage.geojson")
+
+		final_answer(f"Scatter plot of runoff accumulation per phenological stage vs cropping intensity complete.\n{{len(scatter_df)}} data points across {{scatter_df['stage'].nunique()}} phenological stages for {{scatter_df['uid'].nunique()}} MWS.\nExports:\n- Scatter: ./exports/runoff_vs_ci_by_phenostage.png\n- Vector: ./exports/runoff_vs_ci_by_phenostage.geojson")
+
 	elif data['success'] and data['data_type'] == 'timeseries':
 		# Access timeseries data
 		timeseries = data['timeseries_data']
 		# Process timeseries for temporal analysis
 	```
 3. **EARTH ENGINE (SUPPLEMENTARY)**: ONLY use Earth Engine if CoreStack doesn't have the required data or for non-India queries. When using Earth Engine:
-   - Initialize with: `ee.Initialize(project='apt-achievment-453417-h6')`
+   - Initialize with: `ee.Initialize(project='corestack-gee')`
    - Use harmonized Sentinel-2 (COPERNICUS/S2_SR_HARMONIZED) and harmonized Landsat (LANDSAT/LC08/C02/T1_L2)
    - Export to local machine using geedim:
 	```python
@@ -2291,7 +3137,8 @@ def run_hybrid_agent(user_query: str, exports_dir: str = None):
 	agent = CodeAgent(
 		model=model,
 		tools=tools,
-		additional_authorized_imports=["*"]
+		additional_authorized_imports=["*"],
+		executor_kwargs={"timeout_seconds": 120}
 	)
 
 	trace = _start_trace(user_query, model.model_id)
@@ -2360,14 +3207,6 @@ if __name__ == "__main__":
 	"""
 	print("Bot TEST")
 	print("="*70)
-	print("Running query #4 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
-	print("="*70)
-	run_hybrid_agent("How much cropland in Navalgund, Dharwad, Karnataka has turned into built up since 2018? can you show me those regions?")
-
-	# print("Running query #12 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
-	# print("="*70)
-	# run_hybrid_agent("My tehsil navalgund of Dharwad, Karnataka is quite groundwater stressed. Find the top micro-watersheds that have high cropping intensity as well as a large rainfall runoff volume that can be harvested. Similarly, find those micro-watersheds that have a low cropping intensity but high runoff volume. Essentially build a neat scatterplot split into four quadrants of high/low cropping intensity and high/low runoff")
-
 
 	# print("Running query #1 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
 	# print("="*70)
@@ -2381,7 +3220,9 @@ if __name__ == "__main__":
 	# print("="*70)
 	# run_hybrid_agent("Can you show me areas that have lost tree cover in Navalgund, Dharwad, Karnataka since 2018? also hectares of degraded area?")
 
-
+	# print("Running query #4 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+	# print("="*70)
+	# run_hybrid_agent("How much cropland in Navalgund, Dharwad, Karnataka has turned into built up since 2018? can you show me those regions?")
 
     # print("Running query #5 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
 	# print("="*70)
@@ -2414,8 +3255,24 @@ if __name__ == "__main__":
 	# print("="*70)
 	# run_hybrid_agent("In my Navalgund tehsil of Dharwad, Karnataka, compare the SC/ST% population of villages against the number of NREGA works done in the villages. Build a scatter plot.")
 
+	# print("Running query #12 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+	# print("="*70)
+	# run_hybrid_agent("My tehsil navalgund of Dharwad, Karnataka is quite groundwater stressed. Find the top micro-watersheds that have high cropping intensity as well as a large rainfall runoff volume that can be harvested. Similarly, find those micro-watersheds that have a low cropping intensity but high runoff volume. Essentially build a neat scatterplot split into four quadrants of high/low cropping intensity and high/low runoff")
+
 
     # print("Running query #7 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
 	# print("="*70)
 	# run_hybrid_agent("find all microwatersheds in Navalgund tehsil, Dharwad district in Karnataka, with highest surface water availability senstivity to drought")
+
+	# print("Running query #13 from CSV (Navalgund, Dharwad, Karnataka)...")
+	# print("="*70)
+	# run_hybrid_agent("For my tehsil Navalgund of Dharwad, Karnataka, can you create a scatterplot of average monsoon temperatures to cropping intensity?")
+
+	# print("Running query #14 from CSV (Navalgund, Dharwad, Karnataka)...")
+	# print("="*70)
+	# run_hybrid_agent("For my microwatershed 18_16157 in Navalgund, Dharwad, Karnataka, can you find out regions with similar phenological cycles during the years 2019 to 2020, and show per month which regions are in the same phenological stage? Use Sentinel-2 NDVI and MWS boundaries to compute NDVI time series and use phenological stage detection algorithm.")
+
+	print("Running query #15 from CSV (Navalgund, Dharwad, Karnataka)...")
+	print("="*70)
+	run_hybrid_agent("For the microwatersheds in Navalgund, Dharwad, Karnataka identified in the phenological stage analysis, create a scatterplot of runoff accumulation per phenological stage vs cropping intensity. Use the Drought vector rd columns for weekly runoff data, sum them per month, then accumulate per phenological stage per MWS. Plot against cropping intensity from the Cropping Intensity vector for years 2019-2020. Color by phenological stage.")
 
