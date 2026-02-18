@@ -8,6 +8,7 @@ import io
 import re
 import sys
 import json
+import uuid
 import traceback
 from datetime import datetime
 from typing import Dict, Any, Optional
@@ -82,38 +83,60 @@ CORESTACK_DATA_PRODUCTS = {
 }
 
 # ============================================================================
-# LANGFUSE + OPENTELEMETRY AUTO-INSTRUMENTATION (smolagents)
+# LANGFUSE OBSERVABILITY (full lifecycle tracing)
 # ============================================================================
-# The SmolagentsInstrumentor automatically traces every LLM call, tool
-# execution, code block, and error produced by the smolagents CodeAgent.
-# Langfuse reads LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, LANGFUSE_BASE_URL
-# directly from environment variables (set via .env / load_dotenv).
+#
+# Trace hierarchy visible in the Langfuse dashboard:
+#
+#   Session (session_id)                     ← groups user turns
+#   └─ Trace: run_hybrid_agent               ← root per user request
+#        ├─ Span: corestack_api_request      ← each CoreStack HTTP call
+#        ├─ Span: location_resolution        ← geo-resolution workflow
+#        ├─ Span: fetch_corestack_data       ← tool execution
+#        ├─ Generation: llm_call             ← each model inference
+#        ├─ Span: agent_reasoning_step       ← code execution steps
+#        └─ Span: final_response             ← answer packaging
+#
+# SmolagentsInstrumentor (OpenTelemetry) auto-traces every LLM call, tool
+# execution, code block, and error inside CodeAgent.  The module below adds
+# structured spans, session tracking, feedback scoring, cost monitoring,
+# prompt versioning, and error capture on top of that.
 # ============================================================================
 
+from langfuse_observability import (
+	lf_client,
+	observe,
+	is_enabled as _langfuse_is_enabled,
+	generate_session_id,
+	generate_trace_id,
+	set_trace_metadata,
+	set_trace_output,
+	trace_llm_call,
+	trace_tool_call,
+	trace_agent_execution,
+	span as lf_span,
+	generation as lf_generation,
+	score_trace,
+	score_trace_by_id,
+	log_error_to_trace,
+	log_error_to_trace_root,
+	tag_prompt_version,
+	set_prompt_version,
+	get_prompt_version,
+	record_generation_cost,
+	flush as lf_flush,
+	shutdown as lf_shutdown,
+)
+
+_LANGFUSE_ENABLED = _langfuse_is_enabled()
+
+# ── SmolagentsInstrumentor (OpenTelemetry auto-tracing) ──
 try:
 	from openinference.instrumentation.smolagents import SmolagentsInstrumentor
-	from langfuse import observe, get_client as _get_langfuse_client
-
-	# Instrument smolagents — must happen BEFORE any CodeAgent is created
-	SmolagentsInstrumentor().instrument()
-
-	# Verify connection
-	_lf_client = _get_langfuse_client()
-	if _lf_client.auth_check():
-		print("✅ Langfuse connected — smolagents auto-instrumentation active")
-	else:
-		print("⚠️  Langfuse auth check failed — traces will NOT be recorded")
-	_LANGFUSE_ENABLED = True
-except Exception as _lf_err:
-	print(f"⚠️  Langfuse/OpenTelemetry init skipped: {_lf_err}")
-	_LANGFUSE_ENABLED = False
-	# Provide a no-op decorator so @observe() doesn't crash
-	def observe(*args, **kwargs):
-		def decorator(fn):
-			return fn
-		if args and callable(args[0]):
-			return args[0]
-		return decorator
+	SmolagentsInstrumentor().instrument()  # must run BEFORE any CodeAgent
+	print("✅ SmolagentsInstrumentor active — auto-tracing LLM / tool / code steps")
+except Exception as _otel_err:
+	print(f"⚠️  SmolagentsInstrumentor unavailable: {_otel_err}")
 
 
 class _TeeStdout:
@@ -142,7 +165,10 @@ def _extract_code_blocks(text: str) -> str:
 # ============================================================================
 
 
+@observe(name="corestack_api_request", as_type="span")
 def _corestack_request(endpoint: str, params: Optional[Dict[str, Any]] = None) -> Any:
+	"""HTTP GET to CoreStack API — traced as a child span in Langfuse."""
+	import time as _time
 	import requests
 
 	if not CORE_STACK_API_KEY:
@@ -150,17 +176,38 @@ def _corestack_request(endpoint: str, params: Optional[Dict[str, Any]] = None) -
 
 	url = f"{CORESTACK_BASE_URL.rstrip('/')}/{endpoint.lstrip('/')}"
 	headers = {"X-API-Key": CORE_STACK_API_KEY}
-	response = requests.get(url, headers=headers, params=params, timeout=30)
-	response.raise_for_status()
+
+	# ── capture request metadata on the span ──
+	lf_client.update_current_span(
+		input={"endpoint": endpoint, "params": params, "url": url},
+		metadata={"http_method": "GET"},
+	)
+
+	t0 = _time.perf_counter()
 	try:
+		response = requests.get(url, headers=headers, params=params, timeout=30)
+		response.raise_for_status()
 		payload = response.json()
 	except ValueError as exc:
+		log_error_to_trace(exc, context=f"Non-JSON from {endpoint}")
 		raise RuntimeError(f"CoreStack API returned non-JSON response from {endpoint}") from exc
+	except Exception as exc:
+		log_error_to_trace(exc, context=f"API call to {endpoint}")
+		raise
+
+	elapsed_ms = (_time.perf_counter() - t0) * 1000
 
 	if isinstance(payload, dict) and payload.get("success") is False:
 		message = payload.get("message") or payload.get("error") or "Unknown error"
-		raise RuntimeError(f"CoreStack API error from {endpoint}: {message}")
+		err = RuntimeError(f"CoreStack API error from {endpoint}: {message}")
+		log_error_to_trace(err, context=endpoint)
+		raise err
 
+	# ── record response metadata ──
+	lf_client.update_current_span(
+		output={"status_code": response.status_code, "payload_type": type(payload).__name__},
+		metadata={"latency_ms": round(elapsed_ms, 2), "status_code": response.status_code},
+	)
 	return payload
 
 
@@ -460,7 +507,10 @@ def _parse_basic_query(query: str) -> Dict[str, Any]:
 	}
 
 
+@observe(name="corestack_workflow", as_type="span")
 def _run_corestack_workflow(user_query: str) -> Dict[str, Any]:
+	"""Full CoreStack location-resolution + layer-fetch workflow (traced)."""
+	lf_client.update_current_span(input={"user_query": user_query})
 	parsed = _parse_basic_query(user_query)
 	if not CORE_STACK_API_KEY:
 		return {
@@ -546,8 +596,11 @@ def fetch_corestack_data(query: str) -> str:
 	print(f"   Query: {query}")
 	print("="*70)
 
+	import time as _time
+	t0 = _time.perf_counter()
+
 	try:
-		# Run workflow
+		# Run workflow (traced via @observe on _run_corestack_workflow)
 		result_state = _run_corestack_workflow(query)
 
 		# Check for errors
@@ -582,9 +635,19 @@ def fetch_corestack_data(query: str) -> str:
 			}
 		}
 
+		elapsed_ms = (_time.perf_counter() - t0) * 1000
+		n_vector = len(available_layers.get('vector', []))
+		n_raster = len(available_layers.get('raster', []))
+
 		print(f"\n✅ FETCH COMPLETE:")
-		print(f"   Vector layers: {len(available_layers.get('vector', []))}")
-		print(f"   Raster layers: {len(available_layers.get('raster', []))}")
+		print(f"   Vector layers: {n_vector}")
+		print(f"   Raster layers: {n_raster}")
+
+		# ── Record tool output on current observation ──
+		lf_client.update_current_span(
+			output={"vector_layers": n_vector, "raster_layers": n_raster, "location": location_info},
+			metadata={"tool_name": "fetch_corestack_data", "latency_ms": round(elapsed_ms, 2)},
+		)
 
 		response = json.dumps(response_obj, default=str)
 		return response
@@ -592,6 +655,7 @@ def fetch_corestack_data(query: str) -> str:
 	except Exception as e:
 		print(f"\n❌ ERROR: {str(e)}")
 		traceback.print_exc()
+		log_error_to_trace(e, context="fetch_corestack_data")
 		response = json.dumps({
 			"success": False,
 			"error": str(e)
@@ -3590,20 +3654,57 @@ Task: {task}
 # ============================================================================
 
 @observe(name="run_hybrid_agent")
-def run_hybrid_agent(user_query: str, exports_dir: str = None):
+def run_hybrid_agent(user_query: str, exports_dir: str = None, session_id: str = None, user_id: str = None):
 	"""
-	Run CodeAct agent with CoreStack tool + local execution (like agent.py).
+	Run CodeAct agent with CoreStack tool + local execution.
 
-	Uses Gemini model with local executor for full geospatial library support.
-	Structure exactly mirrors agent.py but with CoreStack tool added.
-	Langfuse auto-traces all LLM calls, tool invocations, and code blocks.
+	Trace structure (Langfuse dashboard):
+	──────────────────────────────────────
+	  Session (session_id)
+	  └─ Trace: run_hybrid_agent
+	       ├─ input  = user_query
+	       ├─ metadata = model, prompt_version, …
+	       ├─ Span: corestack_workflow        (from fetch_corestack_data → _run_...)
+	       │    └─ Span: corestack_api_request (each HTTP call)
+	       ├─ Generation: llm_call            (auto-traced by SmolagentsInstrumentor)
+	       ├─ Span: agent_reasoning_step      (auto-traced)
+	       └─ output = final agent answer
+
+	Args:
+		user_query:  The user's natural-language question.
+		exports_dir: Directory for exported files.
+		session_id:  Langfuse session ID to group traces.  Auto-generated if None.
+		user_id:     Optional end-user identifier for the Langfuse trace.
 	"""
-	# Set up absolute exports directory
+	import time as _time
+	t0 = _time.perf_counter()
+
+	_MODEL_ID = "gemini/gemini-2.5-flash-lite"
+
+	# ── 1. Session + trace metadata ──────────────────────────────────────────
+	if session_id is None:
+		session_id = generate_session_id()
+
+	set_trace_metadata(
+		session_id=session_id,
+		user_id=user_id,
+		user_query=user_query,
+		tags=["corestack", "hybrid-agent"],
+		version=get_prompt_version(),
+		metadata={
+			"model": _MODEL_ID,
+			"prompt_version": get_prompt_version(),
+			"exports_dir": exports_dir or "./exports",
+		},
+	)
+	tag_prompt_version()  # attach prompt:v1.0.0 tag
+	print(f"📊 Langfuse session: {session_id}")
+
+	# ── 2. Set up directories ────────────────────────────────────────────────
 	if exports_dir is None:
 		exports_dir = os.path.abspath("./exports")
 	os.makedirs(exports_dir, exist_ok=True)
 
-	# Get workspace directory
 	workspace_dir = os.path.dirname(os.path.abspath(__file__))
 
 	print("\n" + "="*70)
@@ -3611,16 +3712,14 @@ def run_hybrid_agent(user_query: str, exports_dir: str = None):
 	print(f"📝 Query: {user_query}")
 	print("="*70)
 
-	# Use LiteLLM for Gemini (smolagents compatible)
+	# ── 3. Model + agent construction ────────────────────────────────────────
 	model = LiteLLMModel(
-		model_id="gemini/gemini-2.5-flash-lite",
+		model_id=_MODEL_ID,
 		api_key=os.getenv("GEMINI_API_KEY")
 	)
 
-	# Create tools list - NOTE: Only CoreStack tool, NO web_search to force using it
 	tools = [fetch_corestack_data]
 
-	# Use local Python executor
 	print("✅ Using local Python executor")
 	agent = CodeAgent(
 		model=model,
@@ -3633,28 +3732,46 @@ def run_hybrid_agent(user_query: str, exports_dir: str = None):
 	tee_stdout = _TeeStdout(sys.stdout, stdout_buffer)
 
 	try:
-		# Generate prompt and run agent
+		# ── 4. Prompt generation ──────────────────────────────────────────
 		prompt = create_corestack_prompt(user_query)
 
-		# smolagents auto-instrumentation captures every LLM call, tool call,
-		# and code execution step automatically via SmolagentsInstrumentor.
+		# ── 5. Agent execution (auto-traced by SmolagentsInstrumentor) ───
 		with redirect_stdout(tee_stdout):
 			result = agent.run(prompt)
 
 		execution_logs = stdout_buffer.getvalue()
+		elapsed_ms = (_time.perf_counter() - t0) * 1000
+
+		# ── 6. Record output + metrics on the trace ─────────────────────
+		set_trace_output({
+			"answer": str(result)[:2000],
+			"execution_duration_ms": round(elapsed_ms, 2),
+		})
 
 		print("\n" + "="*70)
 		print("✅ AGENT COMPLETED")
+		print(f"⏱️  Duration: {elapsed_ms/1000:.1f}s")
 		print("="*70)
 		print(result)
 		print("="*70)
 
+		# Flush Langfuse events after each run
+		lf_flush()
 		return result
 
 	except Exception as e:
+		elapsed_ms = (_time.perf_counter() - t0) * 1000
 		error_msg = f"Agent execution failed: {str(e)}"
 		print(f"\n❌ ERROR: {error_msg}")
 		traceback.print_exc()
+
+		# ── Record error on the root trace ─────────────────────────────
+		log_error_to_trace_root(e, context="run_hybrid_agent")
+		set_trace_output({
+			"error": error_msg,
+			"execution_duration_ms": round(elapsed_ms, 2),
+		})
+		lf_flush()
 		raise e
 
 
@@ -3664,14 +3781,40 @@ def run_hybrid_agent(user_query: str, exports_dir: str = None):
 
 if __name__ == "__main__":
 	"""
-	Example usage of the hybrid agent with a test query.
+	Example usage of the hybrid agent.
+
+	All queries in this run share one Langfuse session so they appear as a
+	single conversation in the dashboard.  Each run_hybrid_agent() call
+	creates its own trace within that session.
 	"""
 	print("Bot TEST")
 	print("="*70)
 
+	# Create a single session ID to group all traces from this run
+	_session_id = generate_session_id()
+	print(f"📊 Langfuse session ID: {_session_id}")
+
 	print("Running query #1 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
 	print("="*70)
-	run_hybrid_agent("Could you show how cropping intensity has changed over the years in Navalgund, Dharwad, Karnataka?")
+
+	try:
+		result = run_hybrid_agent(
+			"Could you show how cropping intensity has changed over the years in Navalgund, Dharwad, Karnataka?",
+			session_id=_session_id,
+			user_id="dev-test",
+		)
+
+		# ── Example: record user feedback after agent finishes ──
+		# In production this would come from a UI callback.
+		# score_trace(name="user_feedback", value=1.0, data_type="NUMERIC",
+		#             comment="Correct answer")
+
+	except Exception:
+		pass  # error already logged to Langfuse inside run_hybrid_agent
+
+	finally:
+		# Ensure all buffered events reach Langfuse before exit
+		lf_shutdown()
 
 	# print("Running query #2 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
 	# print("="*70)
