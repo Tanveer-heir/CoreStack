@@ -1353,7 +1353,7 @@ it accumulates the runoff (from Drought vector `rd` columns) over the months bel
 and plots it against the average cropping intensity of that MWS for the corresponding year(s).
 
 ✅ DATA SOURCES (ALL from CoreStack — no GEE needed):
-- **Phenological stages GeoJSON**: `./exports/phenological_stages_navalgund.geojson` (output of Query 14)
+- **Phenological stages GeoJSON**: `./exports/phenological_stages.geojson` (output of Query 14)
   Contains `stage_YYYY_MM` columns per MWS, indicating the phenological stage per month.
 - **Drought vector** (115 MWS, ~258 cols): has weekly `rd` columns (format: `rdYY-M-D`)
   These are weekly monsoon-season water-balance departure values per MWS (mm).
@@ -1370,7 +1370,7 @@ and plots it against the average cropping intensity of that MWS for the correspo
 - Cropping Intensity: `cropping_intensity_2019`, `cropping_intensity_2020` for the relevant years.
 
 **METHODOLOGY:**
-1. Read `./exports/phenological_stages_navalgund.geojson` → GeoDataFrame with `uid`, `stage_YYYY_MM` columns.
+1. Read `./exports/phenological_stages.geojson` → GeoDataFrame with `uid`, `stage_YYYY_MM` columns.
 2. Call fetch_corestack_data ONCE → get Drought vector + Cropping Intensity vector.
 3. Print ALL layer names, load both layers as GeoDataFrames.
 4. Parse ALL `rd` columns from Drought vector:
@@ -1388,7 +1388,7 @@ and plots it against the average cropping intensity of that MWS for the correspo
     - Y-axis: Cropping Intensity (%) for that year
     - Color by phenological stage (Bare/Fallow, Dormant, Green-up, Maturity, Peak Vegetation, Senescence)
     - Annotate with legend showing stage colors + count per stage
-    - Title: "Runoff Accumulation per Phenological Stage vs Cropping Intensity — Navalgund"
+    - Title: "Runoff Accumulation per Phenological Stage vs Cropping Intensity"
 11. Export scatter plot PNG to `./exports/runoff_vs_ci_by_phenostage.png`
 12. Export merged data as GeoJSON to `./exports/runoff_vs_ci_by_phenostage.geojson`
 
@@ -1401,6 +1401,39 @@ and plots it against the average cropping intensity of that MWS for the correspo
 - Each scatter point represents ONE (MWS, year, phenological_stage) combination.
 - Some stages may have zero runoff (e.g., non-monsoon stages with no `rd` columns).
 - ⚠️ LOCATION: ALWAYS include location in fetch_corestack_data call.
+
+═══════════════════════════════════════════════════════════════════════════════
+
+**Query Type 16: "Hypothesis test — do villages with higher average temperature have higher cropping intensity?"**
+This query computes per-MWS mean Land Surface Temperature (Landsat 8, all months 2017-2023) and mean
+Cropping Intensity (CI, 2017-2023), then tests the hypothesis that higher LST → higher CI.
+
+✅ DATA SOURCES:
+- **Cropping Intensity vector** from CoreStack (has `uid`, `cropping_intensity_YYYY` columns).
+- **Landsat 8 Collection 2 Level 2** from GEE (ST_B10 thermal band → LST in °C).
+  Uses ALL months (not just monsoon) for a true annual average temperature.
+
+🔴 MANDATORY: For this query type, COPY the code from EXAMPLE 14 below almost verbatim.
+⚠️ DO NOT add try/except blocks. DO NOT wrap code in additional if/else nesting.
+   Keep the FLAT code structure exactly as shown. All variables are defined at the top-level scope.
+
+**METHODOLOGY:**
+1. fetch_corestack_data → load Cropping Intensity vector layer.
+2. Compute `mean_ci` per MWS (average of `cropping_intensity_2017` … `cropping_intensity_2023`).
+3. Extract centroid lat/lon per MWS polygon.
+4. Initialize GEE, build ROI bounding box, build ee.FeatureCollection of centroid points.
+5. Build Landsat 8 annual mean LST composite (2017-2023, all months, cloud-masked).
+6. Sample LST at each centroid → merge with CI on `uid`.
+7. **Hypothesis testing:**
+   a. Pearson correlation (r, p-value) between LST and CI.
+   b. Split MWS into two groups at median LST → "Hot" vs "Cool".
+   c. Independent two-sample t-test: mean CI of Hot vs Cool group.
+   d. Report: r, p-value, t-statistic, means of both groups, effect size (Cohen's d).
+8. Scatter plot with regression line, annotated with Pearson r, p-value.
+   Color points by Hot/Cool group. Add a vertical line at median LST.
+9. Export scatter PNG + GeoJSON with LST, CI, and group columns.
+
+- Output: scatterplot PNG, hypothesis test summary printed, GeoJSON
 
 ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1576,8 +1609,11 @@ For multi-region layers: Read ALL URLs, concat GeoDataFrames, then analyze.
 		import os, requests, rasterio, numpy as np, math
 		os.makedirs('./exports', exist_ok=True)
 
+		# ═══ PARAMETERS — Extract these from the user's query ═══
+		LOCATION = "Navalgund Dharwad Karnataka"  # ← Replace with user's tehsil district state
+
 		# Step 1: Fetch data from CoreStack
-		data = fetch_corestack_data(query="Navalgund Dharwad Karnataka LULC raster")
+		data = fetch_corestack_data(query=f"{{LOCATION}} LULC raster")
 		raster_layers = data['spatial_data']['raster_layers']
 
 		print("Available raster layers:")
@@ -1707,7 +1743,7 @@ For multi-region layers: Read ALL URLs, concat GeoDataFrames, then analyze.
 		axes[2].set_title(f'Crop to Built-up: {{total_change_ha:.1f}} ha')
 		axes[2].axis('off')
 
-		plt.suptitle(f'Cropland to Built-up Conversion\nNavalgund, Dharwad, Karnataka', fontsize=14)
+		plt.suptitle(f'Cropland to Built-up Conversion\n{{LOCATION}}', fontsize=14)
 		plt.tight_layout()
 		plt.savefig('./exports/crop_to_builtup_change.png', dpi=200, bbox_inches='tight')
 		print(f"Visualization saved: ./exports/crop_to_builtup_change.png")
@@ -1963,7 +1999,8 @@ For multi-region layers: Read ALL URLs, concat GeoDataFrames, then analyze.
 		X_scaled = scaler.fit_transform(X)
 
 		# Step 6: Find the target MWS by uid
-		target_uid = '18_16157'  # Replace with the uid from the query
+		# ═══ PARAMETER — Extract from user's query ═══
+		target_uid = '18_16157'  # ← Replace with the MWS uid from the user's query
 		target_idx = merged.index[merged['uid'] == target_uid]
 		if len(target_idx) == 0:
 			print(f"Target uid {{target_uid}} not found! Available uids: {{merged['uid'].tolist()[:10]}}")
@@ -2053,7 +2090,8 @@ For multi-region layers: Read ALL URLs, concat GeoDataFrames, then analyze.
 		from sklearn.preprocessing import StandardScaler
 		from sklearn.linear_model import LogisticRegression
 
-		target_uid = '18_16157'  # Replace with the uid from the query
+		# ═══ PARAMETER — Extract from user's query ═══
+		target_uid = '18_16157'  # ← Replace with the MWS uid from the user's query
 		merged['treatment'] = (merged['uid'] == target_uid).astype(int)
 
 		X = merged[feature_cols].fillna(0).values
@@ -2117,7 +2155,9 @@ For multi-region layers: Read ALL URLs, concat GeoDataFrames, then analyze.
 		print(f"SW-sensitive UIDs ({{len(sw_uids)}}): {{sw_uids}}")
 
 		# Step 2: Fetch LULC vector layer from CoreStack
-		data = fetch_corestack_data(query="Navalgund Dharwad Karnataka LULC vector data")
+		# ═══ PARAMETER — Extract from user's query ═══
+		LOCATION = "Navalgund Dharwad Karnataka"  # ← Replace with user's tehsil district state
+		data = fetch_corestack_data(query=f"{{LOCATION}} LULC vector data")
 		vector_layers = data['spatial_data']['vector_layers']
 
 		print("Available vector layers:")
@@ -2200,7 +2240,9 @@ For multi-region layers: Read ALL URLs, concat GeoDataFrames, then analyze.
 		os.makedirs('./exports', exist_ok=True)
 
 		# Step 1: Fetch data from CoreStack
-		data = fetch_corestack_data(query="Navalgund Dharwad Karnataka NREGA admin boundary villages")
+		# ═══ PARAMETER — Extract from user's query ═══
+		LOCATION = "Navalgund Dharwad Karnataka"  # ← Replace with user's tehsil district state
+		data = fetch_corestack_data(query=f"{{LOCATION}} NREGA admin boundary villages")
 		vector_layers = data['spatial_data']['vector_layers']
 
 		print("Available vector layers:")
@@ -2268,7 +2310,7 @@ For multi-region layers: Read ALL URLs, concat GeoDataFrames, then analyze.
 
 		ax.set_xlabel('SC/ST Population (%)', fontsize=12)
 		ax.set_ylabel('Number of NREGA Works', fontsize=12)
-		ax.set_title(f'SC/ST Population % vs NREGA Works per Village\nNavalgund, Dharwad, Karnataka (Pearson r={{r_value:.3f}})', fontsize=13)
+		ax.set_title(f'SC/ST Population % vs NREGA Works per Village\n{{LOCATION}} (Pearson r={{r_value:.3f}})', fontsize=13)
 		ax.legend(fontsize=10)
 		ax.grid(True, alpha=0.3)
 		plt.tight_layout()
@@ -2291,7 +2333,9 @@ For multi-region layers: Read ALL URLs, concat GeoDataFrames, then analyze.
 		os.makedirs('./exports', exist_ok=True)
 
 		# Step 1: Fetch data from CoreStack
-		data = fetch_corestack_data(query="Navalgund Dharwad Karnataka cropping intensity drought")
+		# ═══ PARAMETER — Extract from user's query ═══
+		LOCATION = "Navalgund Dharwad Karnataka"  # ← Replace with user's tehsil district state
+		data = fetch_corestack_data(query=f"{{LOCATION}} cropping intensity drought")
 		vector_layers = data['spatial_data']['vector_layers']
 
 		print("Available vector layers:")
@@ -2413,7 +2457,7 @@ For multi-region layers: Read ALL URLs, concat GeoDataFrames, then analyze.
 			ax.set_ylabel('Mean Annual Runoff Volume (m³)', fontsize=12)
 
 		ax.set_xlabel('Mean Cropping Intensity (%)', fontsize=12)
-		ax.set_title(f'Micro-watershed: Cropping Intensity vs Harvestable Runoff Volume\nNavalgund, Dharwad, Karnataka | CI threshold={{ci_thresh:.1f}}%, Runoff threshold={{rv_thresh:.0f}} m³', fontsize=12)
+		ax.set_title(f'Micro-watershed: Cropping Intensity vs Harvestable Runoff Volume\n{{LOCATION}} | CI threshold={{ci_thresh:.1f}}%, Runoff threshold={{rv_thresh:.0f}} m³', fontsize=12)
 		ax.legend(fontsize=9, loc='upper left')
 		ax.grid(True, alpha=0.3)
 		plt.tight_layout()
@@ -2442,7 +2486,9 @@ For multi-region layers: Read ALL URLs, concat GeoDataFrames, then analyze.
 		os.makedirs('./exports', exist_ok=True)
 
 		# Step 1: Fetch data from CoreStack
-		result = fetch_corestack_data(query="Navalgund Dharwad Karnataka cropping intensity")
+		# ═══ PARAMETER — Extract from user's query ═══
+		LOCATION = "Navalgund Dharwad Karnataka"  # ← Replace with user's tehsil district state
+		result = fetch_corestack_data(query=f"{{LOCATION}} cropping intensity")
 		data = json.loads(result)
 		vector_layers = data['spatial_data']['vector_layers']
 
@@ -2576,7 +2622,7 @@ For multi-region layers: Read ALL URLs, concat GeoDataFrames, then analyze.
 
 		ax.set_xlabel('Mean Monsoon Land Surface Temperature (°C)', fontsize=12)
 		ax.set_ylabel('Mean Cropping Intensity (%)', fontsize=12)
-		ax.set_title(f'Monsoon LST vs Cropping Intensity per Microwatershed\nNavalgund, Dharwad, Karnataka (2017–2023) | Pearson r={{r_value:.3f}}', fontsize=13)
+		ax.set_title(f'Monsoon LST vs Cropping Intensity per Microwatershed\n{{LOCATION}} (2017–2023) | Pearson r={{r_value:.3f}}', fontsize=13)
 		ax.legend(fontsize=10)
 		ax.grid(True, alpha=0.3)
 		plt.tight_layout()
@@ -2598,7 +2644,9 @@ For multi-region layers: Read ALL URLs, concat GeoDataFrames, then analyze.
 		os.makedirs('./exports', exist_ok=True)
 
 		# Step 1: Fetch data from CoreStack
-		result = fetch_corestack_data(query="Navalgund Dharwad Karnataka admin boundary cropping intensity")
+		# ═══ PARAMETERS — Extract these from the user's query ═══
+		LOCATION = "Navalgund Dharwad Karnataka"  # ← Replace with user's tehsil district state
+		result = fetch_corestack_data(query=f"{{LOCATION}} admin boundary cropping intensity")
 		data = json.loads(result)
 		vector_layers = data['spatial_data']['vector_layers']
 
@@ -2620,7 +2668,9 @@ For multi-region layers: Read ALL URLs, concat GeoDataFrames, then analyze.
 		print(f"MWS shape: {{mws_gdf.shape}}, columns: {{mws_gdf.columns.tolist()}}")
 
 		# Step 3: Verify target MWS exists
-		TARGET_UID = '18_16157'
+		# ═══ PARAMETERS — Extract from user's query ═══
+		TARGET_UID = '18_16157'  # ← Replace with the MWS uid from the user's query
+		YEARS = [2019, 2020]  # ← Replace with year range from the user's query
 		mws_gdf['uid'] = mws_gdf['uid'].astype(str)
 		assert TARGET_UID in mws_gdf['uid'].values, f"Target MWS {{TARGET_UID}} not found!"
 		print(f"Target MWS {{TARGET_UID}} found in dataset with {{len(mws_gdf)}} total MWS")
@@ -2786,8 +2836,8 @@ For multi-region layers: Read ALL URLs, concat GeoDataFrames, then analyze.
 			print(f"  {{row['uid']}}: {{row['similarity_pct']}}% match ({{row['months_matching']}}/{{len(match_columns)}} months)")
 
 		# Step 15: Export GeoJSON
-		export_gdf.to_file('./exports/phenological_stages_navalgund.geojson', driver='GeoJSON')
-		print(f"\nGeoJSON exported to ./exports/phenological_stages_navalgund.geojson")
+		export_gdf.to_file('./exports/phenological_stages.geojson', driver='GeoJSON')
+		print(f"\nGeoJSON exported to ./exports/phenological_stages.geojson")
 
 		# Step 16: Heatmap visualization of phenological stages
 		import matplotlib
@@ -2836,7 +2886,7 @@ For multi-region layers: Read ALL URLs, concat GeoDataFrames, then analyze.
 
 			ax.set_xlabel('Month', fontsize=11)
 			ax.set_ylabel('Microwatershed UID', fontsize=11)
-			ax.set_title(f'Phenological Stages per Microwatershed\nNavalgund, Dharwad, Karnataka (2019-2020)\nTarget: {{TARGET_UID}} (top row)', fontsize=12)
+			ax.set_title(f'Phenological Stages per Microwatershed\n{{LOCATION}} ({{YEARS[0]}}-{{YEARS[-1]}})\nTarget: {{TARGET_UID}} (top row)', fontsize=12)
 
 			legend_elements = [Patch(facecolor=colors[i], label=stage_order[i]) for i in range(len(stage_order))]
 			ax.legend(handles=legend_elements, loc='upper left', bbox_to_anchor=(1.02, 1), fontsize=7, title='Stage')
@@ -2845,7 +2895,7 @@ For multi-region layers: Read ALL URLs, concat GeoDataFrames, then analyze.
 			plt.savefig('./exports/phenological_stages_heatmap.png', dpi=200, bbox_inches='tight')
 			print(f"Heatmap saved to ./exports/phenological_stages_heatmap.png")
 
-		final_answer(f"Phenological stage analysis complete for {{len(export_gdf)}} microwatersheds.\nTarget MWS: {{TARGET_UID}}\nMWS with >=50% similarity: {{len(similar)}}\nExports:\n- Vector: ./exports/phenological_stages_navalgund.geojson\n- Heatmap: ./exports/phenological_stages_heatmap.png")
+		final_answer(f"Phenological stage analysis complete for {{len(export_gdf)}} microwatersheds.\nTarget MWS: {{TARGET_UID}}\nMWS with >=50% similarity: {{len(similar)}}\nExports:\n- Vector: ./exports/phenological_stages.geojson\n- Heatmap: ./exports/phenological_stages_heatmap.png")
 
 		# ╔══════════════════════════════════════════════════════════════╗
 		# ║ EXAMPLE 13: RUNOFF ACCUMULATION per PHENOLOGICAL STAGE     ║
@@ -2860,7 +2910,7 @@ For multi-region layers: Read ALL URLs, concat GeoDataFrames, then analyze.
 		import geopandas as gpd
 		import pandas as pd
 		import numpy as np
-		pheno_gdf = gpd.read_file('./exports/phenological_stages_navalgund.geojson')
+		pheno_gdf = gpd.read_file('./exports/phenological_stages.geojson')
 		pheno_gdf['uid'] = pheno_gdf['uid'].astype(str)
 		print(f"Loaded phenological GeoJSON: {{pheno_gdf.shape[0]}} MWS, {{pheno_gdf.shape[1]}} columns")
 
@@ -2883,7 +2933,9 @@ For multi-region layers: Read ALL URLs, concat GeoDataFrames, then analyze.
 		print(f"Unique stages: {{pheno_df['stage'].value_counts().to_dict()}}")
 
 		# Step 2: Fetch Drought + Cropping Intensity from CoreStack
-		result = fetch_corestack_data(query="Navalgund Dharwad Karnataka cropping intensity drought")
+		# ═══ PARAMETER — Extract from user's query ═══
+		LOCATION = "Navalgund Dharwad Karnataka"  # ← Replace with user's tehsil district state
+		result = fetch_corestack_data(query=f"{{LOCATION}} cropping intensity drought")
 		data = json.loads(result)
 		vector_layers = data['spatial_data']['vector_layers']
 
@@ -3005,7 +3057,7 @@ For multi-region layers: Read ALL URLs, concat GeoDataFrames, then analyze.
 
 		ax.set_xlabel('Runoff Accumulation (mm) during Phenological Stage', fontsize=12)
 		ax.set_ylabel('Cropping Intensity (%)', fontsize=12)
-		ax.set_title('Runoff Accumulation per Phenological Stage vs Cropping Intensity\nNavalgund, Dharwad, Karnataka (2019-2020)', fontsize=13)
+		ax.set_title(f'Runoff Accumulation per Phenological Stage vs Cropping Intensity\n{{LOCATION}}', fontsize=13)
 		ax.legend(fontsize=9, loc='upper left', title='Phenological Stage')
 		ax.grid(True, alpha=0.3)
 
@@ -3038,6 +3090,225 @@ For multi-region layers: Read ALL URLs, concat GeoDataFrames, then analyze.
 		print(f"GeoJSON exported to ./exports/runoff_vs_ci_by_phenostage.geojson")
 
 		final_answer(f"Scatter plot of runoff accumulation per phenological stage vs cropping intensity complete.\n{{len(scatter_df)}} data points across {{scatter_df['stage'].nunique()}} phenological stages for {{scatter_df['uid'].nunique()}} MWS.\nExports:\n- Scatter: ./exports/runoff_vs_ci_by_phenostage.png\n- Vector: ./exports/runoff_vs_ci_by_phenostage.geojson")
+
+		# ╔══════════════════════════════════════════════════════════════╗
+		# ║ EXAMPLE 14: HYPOTHESIS TEST — LST vs CROPPING INTENSITY    ║
+		# ║ ⚠️ For Query Type 16, COPY THIS CODE ALMOST VERBATIM.       ║
+		# ║ Fetches CI from CoreStack, LST from GEE Landsat 8          ║
+		# ║ Pearson r + two-sample t-test (Hot vs Cool MWS groups)     ║
+		# ╚══════════════════════════════════════════════════════════════╝
+		import os, json
+		os.makedirs('./exports', exist_ok=True)
+
+		# ═══ PARAMETER — Extract from user's query ═══
+		LOCATION = "Navalgund Dharwad Karnataka"  # ← Replace with user's tehsil district state
+
+		# Step 1: Fetch data from CoreStack
+		result = fetch_corestack_data(query=f"{{LOCATION}} cropping intensity")
+		data = json.loads(result)
+		vector_layers = data['spatial_data']['vector_layers']
+
+		print("Available vector layers:")
+		for layer in vector_layers:
+			print(f"  - {{layer['layer_name']}}")
+
+		# Step 2: Load Cropping Intensity layer
+		import geopandas as gpd
+		import pandas as pd
+		import numpy as np
+		ci_gdf = None
+		for layer in vector_layers:
+			lname = layer['layer_name'].lower()
+			if 'cropping' in lname and 'intensity' in lname and ci_gdf is None:
+				print(f"Found Cropping Intensity layer: {{layer['layer_name']}}")
+				ci_gdf = pd.concat([gpd.read_file(u['url']) for u in layer['urls']], ignore_index=True).to_crs('EPSG:4326')
+
+		print(f"CI shape: {{ci_gdf.shape}}, columns: {{ci_gdf.columns.tolist()}}")
+
+		# Step 3: Compute mean cropping intensity per MWS (2017-2023)
+		ci_cols = [c for c in ci_gdf.columns if c.startswith('cropping_intensity_')]
+		ci_cols_filtered = [c for c in ci_cols if int(c.split('_')[-1]) >= 2017 and int(c.split('_')[-1]) <= 2023]
+		ci_gdf['mean_ci'] = ci_gdf[ci_cols_filtered].mean(axis=1)
+		print(f"CI year columns used: {{ci_cols_filtered}}")
+		print(f"Mean CI range: {{ci_gdf['mean_ci'].min():.1f}} to {{ci_gdf['mean_ci'].max():.1f}}")
+
+		# Step 4: Extract centroid lat/lon
+		ci_gdf['centroid_lon'] = ci_gdf.geometry.centroid.x
+		ci_gdf['centroid_lat'] = ci_gdf.geometry.centroid.y
+
+		# Step 5: Initialize Earth Engine and build ROI
+		import ee
+		ee.Initialize(project='corestack-gee')
+		minx, miny, maxx, maxy = ci_gdf.total_bounds
+		ee_roi = ee.Geometry.Rectangle([float(minx), float(miny), float(maxx), float(maxy)])
+		print(f"GEE ROI: [{{minx:.4f}}, {{miny:.4f}}, {{maxx:.4f}}, {{maxy:.4f}}]")
+
+		# Step 6: Cloud masking + LST functions for Landsat 8 C2L2
+		def cloud_mask_l8(image):
+			qa = image.select('QA_PIXEL')
+			cloud = qa.bitwiseAnd(1 << 3).eq(0)
+			shadow = qa.bitwiseAnd(1 << 4).eq(0)
+			return image.updateMask(cloud.And(shadow))
+
+		def compute_lst(image):
+			lst = image.select('ST_B10').multiply(0.00341802).add(149.0).subtract(273.15)
+			return lst.rename('LST').copyProperties(image, ['system:time_start'])
+
+		# Step 7: Build ANNUAL mean LST composite (ALL months, 2017-2023)
+		all_images = ee.ImageCollection('LANDSAT/LC08/C02/T1_L2') \
+			.filterBounds(ee_roi) \
+			.filterDate('2017-01-01', '2023-12-31') \
+			.map(cloud_mask_l8) \
+			.map(compute_lst)
+
+		scene_count = all_images.size().getInfo()
+		print(f"Total Landsat 8 scenes (2017-2023, all months): {{scene_count}}")
+		mean_lst = all_images.mean()
+
+		# Step 8: Build centroid points FeatureCollection
+		points = []
+		for idx, row in ci_gdf.iterrows():
+			pt = ee.Geometry.Point([float(row['centroid_lon']), float(row['centroid_lat'])])
+			points.append(ee.Feature(pt, {{'uid': str(row['uid'])}}))
+		fc_points = ee.FeatureCollection(points)
+		print(f"Created {{len(points)}} centroid points for GEE sampling")
+
+		# Step 9: Sample LST at centroids
+		sampled = mean_lst.sampleRegions(collection=fc_points, scale=30, geometries=False)
+		result_features = sampled.getInfo()['features']
+		print(f"GEE returned {{len(result_features)}} sampled points")
+
+		lst_records = []
+		for feat in result_features:
+			props = feat['properties']
+			uid = props.get('uid')
+			lst_val = props.get('LST')
+			if uid is not None and lst_val is not None:
+				if not np.isnan(lst_val):
+					lst_records.append({{'uid': str(uid), 'mean_lst': float(lst_val)}})
+
+		lst_df = pd.DataFrame(lst_records)
+		print(f"Valid LST values: {{len(lst_df)}}")
+		print(f"LST range: {{lst_df['mean_lst'].min():.2f}} to {{lst_df['mean_lst'].max():.2f}} °C")
+
+		# Step 10: Merge LST with CI
+		ci_gdf['uid'] = ci_gdf['uid'].astype(str)
+		merged = ci_gdf[['uid', 'mean_ci', 'geometry']].merge(lst_df, on='uid', how='inner')
+		merged = merged.dropna(subset=['mean_ci', 'mean_lst'])
+		print(f"Merged MWS count: {{len(merged)}}")
+
+		# Step 11: Hypothesis testing
+		from scipy import stats as sp_stats
+
+		# 11a: Pearson correlation
+		r_val, p_val = sp_stats.pearsonr(merged['mean_lst'], merged['mean_ci'])
+		print(f"\n═══ HYPOTHESIS TEST RESULTS ═══")
+		print(f"H0: No linear relationship between LST and Cropping Intensity")
+		print(f"H1: Higher average temperature → higher cropping intensity")
+		print(f"\nPearson r = {{r_val:.4f}}, p-value = {{p_val:.6f}}")
+		if p_val < 0.05:
+			print(f"→ Reject H0 at α=0.05: significant linear relationship (r={{r_val:.3f}})")
+		else:
+			print(f"→ Fail to reject H0 at α=0.05: no significant linear relationship")
+
+		# 11b: Split into Hot / Cool groups at median LST
+		lst_median = merged['mean_lst'].median()
+		merged['lst_group'] = merged['mean_lst'].apply(lambda x: 'Hot' if x >= lst_median else 'Cool')
+		hot_ci = merged[merged['lst_group'] == 'Hot']['mean_ci']
+		cool_ci = merged[merged['lst_group'] == 'Cool']['mean_ci']
+		print(f"\nMedian LST threshold: {{lst_median:.2f}} °C")
+		print(f"Hot group (≥ median): n={{len(hot_ci)}}, mean CI={{hot_ci.mean():.1f}}%")
+		print(f"Cool group (< median): n={{len(cool_ci)}}, mean CI={{cool_ci.mean():.1f}}%")
+
+		# 11c: Independent two-sample t-test
+		t_stat, t_pval = sp_stats.ttest_ind(hot_ci, cool_ci, equal_var=False)
+		print(f"\nWelch's t-test: t={{t_stat:.4f}}, p={{t_pval:.6f}}")
+		if t_pval < 0.05:
+			print(f"→ Reject H0 at α=0.05: Hot and Cool groups have significantly different CI")
+		else:
+			print(f"→ Fail to reject H0 at α=0.05: no significant difference in CI between groups")
+
+		# 11d: Effect size (Cohen's d)
+		pooled_std = np.sqrt((hot_ci.std()**2 + cool_ci.std()**2) / 2)
+		if pooled_std > 0:
+			cohens_d = (hot_ci.mean() - cool_ci.mean()) / pooled_std
+			print(f"Cohen's d = {{cohens_d:.3f}} ({{'small' if abs(cohens_d) < 0.5 else 'medium' if abs(cohens_d) < 0.8 else 'large'}} effect)")
+		else:
+			cohens_d = 0.0
+			print(f"Cohen's d = 0 (no variance)")
+
+		# Step 12: Build scatter plot
+		import matplotlib
+		matplotlib.use('Agg')
+		import matplotlib.pyplot as plt
+
+		fig, ax = plt.subplots(figsize=(14, 10))
+
+		# Color by group
+		for grp, color, marker in [('Hot', 'orangered', 'o'), ('Cool', 'steelblue', 's')]:
+			subset = merged[merged['lst_group'] == grp]
+			ax.scatter(subset['mean_lst'], subset['mean_ci'], c=color, s=70, alpha=0.7,
+					edgecolors='black', linewidth=0.5, marker=marker,
+					label=f'{{grp}} (n={{len(subset)}}, mean CI={{subset["mean_ci"].mean():.1f}}%)')
+
+		# Annotate each point with uid
+		for _, row in merged.iterrows():
+			ax.annotate(row['uid'], (row['mean_lst'], row['mean_ci']),
+					fontsize=5, alpha=0.6, ha='left', va='bottom',
+					xytext=(3, 3), textcoords='offset points')
+
+		# Regression line
+		slope, intercept, _, _, _ = sp_stats.linregress(merged['mean_lst'], merged['mean_ci'])
+		x_line = np.linspace(merged['mean_lst'].min(), merged['mean_lst'].max(), 100)
+		ax.plot(x_line, slope * x_line + intercept, 'k--', linewidth=1.5,
+				label=f'Regression (r={{r_val:.3f}}, p={{p_val:.4f}})')
+
+		# Median LST threshold line
+		ax.axvline(lst_median, color='gray', linestyle=':', alpha=0.7, linewidth=1.2,
+				label=f'Median LST = {{lst_median:.1f}} °C')
+
+		# Annotations box with hypothesis test results
+		textstr = (f'Pearson r = {{r_val:.3f}} (p={{p_val:.4f}})\n'
+				   f"Welch t = {{t_stat:.2f}} (p={{t_pval:.4f}})\n"
+				   f"Cohen's d = {{cohens_d:.3f}}\n"
+				   f"Hot mean CI = {{hot_ci.mean():.1f}}%\n"
+				   f"Cool mean CI = {{cool_ci.mean():.1f}}%")
+		props = dict(boxstyle='round', facecolor='wheat', alpha=0.8)
+		ax.text(0.98, 0.02, textstr, transform=ax.transAxes, fontsize=9,
+				verticalalignment='bottom', horizontalalignment='right', bbox=props)
+
+		ax.set_xlabel('Mean Land Surface Temperature (°C)', fontsize=12)
+		ax.set_ylabel('Mean Cropping Intensity (%)', fontsize=12)
+		ax.set_title(f'Hypothesis Test: Higher LST → Higher Cropping Intensity?\n{{LOCATION}} (2017–2023) | Pearson r={{r_val:.3f}}, p={{p_val:.4f}}', fontsize=13)
+		ax.legend(fontsize=9, loc='upper left')
+		ax.grid(True, alpha=0.3)
+		plt.tight_layout()
+		plt.savefig('./exports/lst_ci_hypothesis_test.png', dpi=200, bbox_inches='tight')
+		print(f"\nScatter plot saved to ./exports/lst_ci_hypothesis_test.png")
+
+		# Step 13: Export GeoJSON
+		export_gdf = gpd.GeoDataFrame(merged, geometry='geometry')
+		export_gdf.to_file('./exports/lst_ci_hypothesis_test.geojson', driver='GeoJSON')
+		print(f"GeoJSON exported to ./exports/lst_ci_hypothesis_test.geojson")
+
+		# Step 14: Build result string and return
+		pearson_sig = '(significant)' if p_val < 0.05 else '(not significant)'
+		ttest_sig = '(significant)' if t_pval < 0.05 else '(not significant)'
+		hot_mean = hot_ci.mean()
+		cool_mean = cool_ci.mean()
+		result_text = (
+			f"Hypothesis test complete for {{len(merged)}} microwatersheds in {{LOCATION}}.\n\n"
+			f"Results:\n"
+			f"- Pearson r = {{r_val:.4f}}, p = {{p_val:.6f}} {{pearson_sig}}\n"
+			f"- Welch t-test: t = {{t_stat:.4f}}, p = {{t_pval:.6f}} {{ttest_sig}}\n"
+			f"- Hot group (LST >= {{lst_median:.1f}} C): mean CI = {{hot_mean:.1f}}%\n"
+			f"- Cool group (LST < {{lst_median:.1f}} C): mean CI = {{cool_mean:.1f}}%\n"
+			f"- Cohen's d = {{cohens_d:.3f}}\n\n"
+			f"Exports:\n"
+			f"- Scatter: ./exports/lst_ci_hypothesis_test.png\n"
+			f"- Vector: ./exports/lst_ci_hypothesis_test.geojson"
+		)
+		final_answer(result_text)
 
 	elif data['success'] and data['data_type'] == 'timeseries':
 		# Access timeseries data
@@ -3272,7 +3543,11 @@ if __name__ == "__main__":
 	# print("="*70)
 	# run_hybrid_agent("For my microwatershed 18_16157 in Navalgund, Dharwad, Karnataka, can you find out regions with similar phenological cycles during the years 2019 to 2020, and show per month which regions are in the same phenological stage? Use Sentinel-2 NDVI and MWS boundaries to compute NDVI time series and use phenological stage detection algorithm.")
 
-	print("Running query #15 from CSV (Navalgund, Dharwad, Karnataka)...")
+	# print("Running query #15 from CSV (Navalgund, Dharwad, Karnataka)...")
+	# print("="*70)
+	# run_hybrid_agent("For the microwatersheds in Navalgund, Dharwad, Karnataka identified in the phenological stage analysis, create a scatterplot of runoff accumulation per phenological stage vs cropping intensity. Use the Drought vector rd columns for weekly runoff data, sum them per month, then accumulate per phenological stage per MWS. Plot against cropping intensity from the Cropping Intensity vector for years 2019-2020. Color by phenological stage.")
+
+	print("Running query #16 from CSV (Navalgund, Dharwad, Karnataka)...")
 	print("="*70)
-	run_hybrid_agent("For the microwatersheds in Navalgund, Dharwad, Karnataka identified in the phenological stage analysis, create a scatterplot of runoff accumulation per phenological stage vs cropping intensity. Use the Drought vector rd columns for weekly runoff data, sum them per month, then accumulate per phenological stage per MWS. Plot against cropping intensity from the Cropping Intensity vector for years 2019-2020. Color by phenological stage.")
+	run_hybrid_agent("For my Navalgund tehsil in Dharwad, Karnataka, test the hypothesis that villages with higher average temperature have higher cropping intensity. Compute per-MWS average Land Surface Temperature from Landsat 8 and cropping intensity from CoreStack, build a scatterplot, and perform hypothesis testing (Pearson correlation + t-test on hot vs cool groups).")
 
