@@ -10,9 +10,14 @@ import sys
 import json
 import uuid
 import traceback
+import warnings
 from datetime import datetime
 from typing import Dict, Any, Optional
 from contextlib import redirect_stdout
+
+# Suppress GeoPandas/Shapely geographic CRS centroid warning
+# (agent-generated code computes centroids in WGS84 for GEE point sampling — acceptable accuracy)
+warnings.filterwarnings("ignore", message=".*Geometry is in a geographic CRS.*centroid.*")
 
 from dotenv import load_dotenv
 

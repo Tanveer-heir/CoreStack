@@ -8,6 +8,13 @@
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <script src="https://unpkg.com/lucide@latest"></script>
 
+    <!-- Leaflet for GeoJSON map rendering -->
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
     <style>
       /* --- CSS VARIABLES & RESET --- */
       :root {
@@ -653,23 +660,102 @@
                              <img alt="Loading preview..." style="opacity:0.3; max-width:100%;">
                            </div>`;
           } else if (isGeoVector) {
+            const mapId = `map-${file.filename.replace(/[^a-zA-Z0-9]/g, "_")}`;
+            previewHtml = `<div class="artifact-preview">
+                             <div id="${mapId}" style="height:350px; width:100%; background:#1a1a2e;"></div>
+                             <div class="geo-toggle" style="text-align:center; padding:0.4rem; border-top:1px solid var(--border);">
+                               <button onclick="toggleGeoView(this, '${mapId}')" style="background:none; border:1px solid var(--border); color:var(--text-secondary); border-radius:4px; padding:0.25rem 0.75rem; cursor:pointer; font-size:0.7rem;">Show Raw JSON</button>
+                             </div>
+                             <pre class="geo-preview" style="display:none; max-height:300px; overflow:auto; padding:1rem; font-size:0.7rem; color:#10b981;"></pre>
+                           </div>`;
+
+            // Fetch GeoJSON and render on Leaflet map
             fetch(`${API_BASE}/exports/${file.filename}/preview`)
               .then((r) => r.json())
               .then((d) => {
+                if (!d.data) return;
+                const geojsonData =
+                  typeof d.data === "object" ? d.data : JSON.parse(d.data);
+
+                // Fill the raw JSON fallback
                 const pre = card.querySelector(".geo-preview");
-                if (pre && d.data) {
-                  const summary =
-                    typeof d.data === "object"
-                      ? JSON.stringify(d.data, null, 2).substring(0, 3000)
-                      : String(d.data).substring(0, 3000);
-                  pre.textContent = summary;
-                  pre.style.color = "#10b981";
+                if (pre)
+                  pre.textContent = JSON.stringify(
+                    geojsonData,
+                    null,
+                    2,
+                  ).substring(0, 5000);
+
+                // Initialize Leaflet map
+                const mapEl = card.querySelector(`#${mapId}`);
+                if (!mapEl) return;
+
+                const map = L.map(mapEl, {
+                  attributionControl: false,
+                  zoomControl: true,
+                });
+                L.tileLayer(
+                  "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
+                  {
+                    maxZoom: 19,
+                    attribution: "",
+                  },
+                ).addTo(map);
+
+                const geoLayer = L.geoJSON(geojsonData, {
+                  style: function () {
+                    return {
+                      color: "#6366f1",
+                      weight: 2,
+                      fillColor: "#818cf8",
+                      fillOpacity: 0.35,
+                    };
+                  },
+                  pointToLayer: function (feature, latlng) {
+                    return L.circleMarker(latlng, {
+                      radius: 6,
+                      fillColor: "#6366f1",
+                      color: "#fff",
+                      weight: 1,
+                      fillOpacity: 0.8,
+                    });
+                  },
+                  onEachFeature: function (feature, layer) {
+                    if (feature.properties) {
+                      let popup =
+                        '<div style="max-height:200px; overflow:auto; font-size:0.75rem;">';
+                      for (const [k, v] of Object.entries(feature.properties)) {
+                        popup += `<b>${k}:</b> ${v}<br>`;
+                      }
+                      popup += "</div>";
+                      layer.bindPopup(popup);
+                    }
+                  },
+                }).addTo(map);
+
+                // Fit map to data bounds
+                try {
+                  const bounds = geoLayer.getBounds();
+                  if (bounds.isValid()) {
+                    map.fitBounds(bounds, { padding: [20, 20] });
+                  } else {
+                    map.setView([20, 78], 5);
+                  }
+                } catch (e) {
+                  map.setView([20, 78], 5);
                 }
+
+                // Store map reference for resize
+                mapEl._leafletMap = map;
+                setTimeout(() => map.invalidateSize(), 200);
               })
-              .catch(() => {});
-            previewHtml = `<div class="artifact-preview">
-                             <pre class="geo-preview" style="max-height:300px; overflow:auto; padding:1rem; font-size:0.7rem; color:#94a3b8;">Loading ${file.type.toUpperCase()} preview...</pre>
-                           </div>`;
+              .catch((err) => {
+                console.error("GeoJSON map error:", err);
+                const mapEl = card.querySelector(`#${mapId}`);
+                if (mapEl)
+                  mapEl.innerHTML =
+                    '<div style="padding:1rem; color:var(--danger);">Failed to load map preview</div>';
+              });
           } else if (isTextData) {
             fetch(`${API_BASE}/exports/${file.filename}/preview`)
               .then((r) => r.json())
@@ -709,6 +795,30 @@
           container.appendChild(card);
           lucide.createIcons();
         });
+      }
+
+      // --- 6. TOGGLE MAP / RAW JSON VIEW ---
+      function toggleGeoView(btn, mapId) {
+        const card = btn.closest(".artifact-card");
+        const mapEl = card.querySelector(`#${mapId}`);
+        const pre = card.querySelector(".geo-preview");
+        if (!mapEl || !pre) return;
+
+        if (pre.style.display === "none") {
+          // Show raw JSON, hide map
+          pre.style.display = "block";
+          mapEl.style.display = "none";
+          btn.textContent = "Show Map";
+        } else {
+          // Show map, hide raw JSON
+          pre.style.display = "none";
+          mapEl.style.display = "block";
+          btn.textContent = "Show Raw JSON";
+          // Refresh map tiles after re-display
+          if (mapEl._leafletMap) {
+            setTimeout(() => mapEl._leafletMap.invalidateSize(), 100);
+          }
+        }
       }
     </script>
   </body>
