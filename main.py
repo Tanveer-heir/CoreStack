@@ -51,8 +51,8 @@ CORESTACK_DATA_PRODUCTS = {
 	"raster_layers": [
 		"land_use_land_cover_raster",
 		"terrain_raster",
-		"change_tree_cover_gain_raster",
-		"change_tree_cover_loss_raster",
+		"change_detection_deforestation_raster",
+		"change_detection_afforestation_raster",
 		"change_cropping_reduction_raster",
 		"change_cropping_intensity_raster",
 		"tree_canopy_cover_density_raster",
@@ -713,12 +713,24 @@ LAYER SELECTION DECISION FRAMEWORK (WITH EXPLANATIONS)
 ✅ CORRECT CHOICE: cropping_intensity_vector (spatial vector)
 ❌ WRONG CHOICE: watershed timeseries
 
+🔴 MANDATORY: For this query type, COPY the code from EXAMPLE 1 below almost verbatim.
+   The code fetches the Cropping Intensity vector, extracts yearly columns, computes averages,
+   plots a time-series line chart PNG, AND exports a GeoJSON summary per MWS.
+
 WHY SPATIAL?
 - Cropping intensity is SPATIALLY VARIABLE (different fields = different intensity)
 - You want: total area under crops in village, which varies by location
 - Data structure: GeoDataFrame with polygon features
 - Temporal aspect: Stored as yearly columns (cropping_intensity_2017, 2018, ..., 2023)
 - Analysis approach: Sum/average these columns across village polygons, plot trend
+
+⚠️ CRITICAL LAYER NAME MATCHING:
+- Cropping Intensity layer: `"Cropping Intensity (dharwad_navalgund_intensity)"` — match with `'cropping' in layer['layer_name'].lower() and 'intensity' in layer['layer_name'].lower()`
+- ALWAYS print ALL vector layer names FIRST: `for l in vector_layers: print(l['layer_name'])`
+
+OUTPUTS (MANDATORY — produce ALL of these):
+- PNG: `./exports/cropping_intensity_over_years.png` — time-series line chart of average CI per year
+- GeoJSON: `./exports/cropping_intensity_by_mws.geojson` — each MWS polygon with yearly CI values and mean CI
 
 WHY NOT TIMESERIES?
 - Watershed timeseries measures aggregate WATER BALANCE (runoff, precip, ET)
@@ -730,25 +742,69 @@ WHY NOT TIMESERIES?
 ✅ PRIMARY: surface_water_bodies_vector (spatial vector)
 ⚠️  OPTIONAL CONTEXT: water_balance (timeseries) for watershed-level trends
 
+🔴 MANDATORY: For this query type, COPY the code from EXAMPLE 1b below almost verbatim.
+   The code fetches the Surface Water Bodies vector, aggregates water area by MWS per hydro-year,
+   plots a time-series line chart PNG, AND exports a GeoJSON summary per MWS.
+
 WHY SPATIAL?
 - Surface water bodies are PHYSICAL FEATURES with geometry (lakes, ponds, reservoirs)
 - You want: total area of water bodies within village boundaries
 - Data structure: Polygon features with seasonal attributes (Kharif/Rabi/Zaid flags)
-- Analysis: Clip polygons to village, sum area per season
+- Analysis: Group by MWS_UID, sum area_YY-YY columns per year, plot trend
 
-CAVEAT: surface_water_bodies_vector may be a SINGLE SNAPSHOT per year
-- For multi-year TRENDS, derive from land_use_land_cover_raster
-- Workaround: Count water pixels (classes 2-4) in LULC for years 2017-2024
+⚠️ CRITICAL LAYER NAME MATCHING:
+- Surface water layer: `"Surface Water Bodies (surface_waterbodies_dharwad_navalgund)"` — match with `'surface water' in layer['layer_name'].lower()` AND `'zoi' not in layer['layer_name'].lower()`
+- There are TWO surface water layers — use the one WITHOUT 'zoi' in its name
+- ALWAYS print ALL vector layer names FIRST
 
-**Query Type 3: "Tree Cover Loss in [Village] Since [Year]"**
-✅ CORRECT: change_tree_cover_loss_raster (change raster)
+SURFACE WATER DATA COLUMN REFERENCE:
+- `area_YY-YY`: Water spread area in hectares for hydro-year (e.g., `area_17-18` = 2017-18 hydro-year)
+- `k_YY-YY`: Kharif season water availability (percentage)
+- `kr_YY-YY`: Kharif+Rabi season water availability (percentage)
+- `krz_YY-YY`: Kharif+Rabi+Zaid season water availability (percentage)
+- `MWS_UID`: Microwatershed UID (use for groupby aggregation)
+- Each row is ONE water body — multiple water bodies per MWS
+
+YEAR COLUMNS: area_17-18, area_18-19, area_19-20, area_20-21, area_21-22, area_22-23
+
+OUTPUTS (MANDATORY — produce ALL of these):
+- PNG: `./exports/surface_water_trend.png` — time-series line chart of total water area per year (summed across all MWS)
+- GeoJSON: `./exports/surface_water_availability_by_mws.geojson` — each MWS with aggregated water area per year
+
+**Query Type 3: "Tree Cover Loss / Deforestation in [Village] Since [Year]"**
+✅ CORRECT: The deforestation change detection raster
+⚠️ The ACTUAL API layer name is: `"Change Detection Raster (change_dharwad_navalgund_Deforestation)"`
+   Match with: `'deforestation' in layer['layer_name'].lower()`
+   For degradation: `'degradation' in layer['layer_name'].lower()`
+⛔ NEVER search for 'tree_cover_loss' or 'change_tree_cover_loss' — those names do NOT exist in the API.
+
+🔴 MANDATORY: For this query type, COPY the code from EXAMPLE 2 below almost verbatim.
+   The code fetches the Deforestation change detection raster, computes loss area in hectares,
+   creates a visualization PNG, AND exports a deforestation summary GeoJSON.
+
+ACTUAL CHANGE DETECTION LAYER NAMES FROM API (confirmed):
+- `"Change Detection Raster (change_dharwad_navalgund_Deforestation)"` — tree cover loss
+- `"Change Detection Raster (change_dharwad_navalgund_Afforestation)"` — tree cover gain
+- `"Change Detection Raster (change_dharwad_navalgund_Degradation)"` — land degradation
+- `"Change Detection Raster (change_dharwad_navalgund_Urbanization)"` — urbanization (may 404)
+- `"Change Detection Raster (change_dharwad_navalgund_CropIntensity)"` — crop intensity change
+- `"Tree Overall Change Raster (overall_change_raster_dharwad_navalgund)"` — overall tree change
 
 WHY CHANGE RASTER?
-- Pre-computed transition matrix: trees (class 6) → other classes
-- Period: 2017-2022 composite (mode of 2017-2019 vs 2020-2022)
-- Classes: Trees→Built-up, Trees→Barren, Trees→Crops, Trees→Shrubs
+- Pre-computed deforestation detection (2017-2022)
 - Analysis: Mask to loss classes, count pixels, convert to hectares
 - SAVES COMPUTATION vs manually comparing 2017 vs 2022 LULC
+
+⚠️ SANDBOX CONSTRAINTS (CRITICAL — violations cause instant failure):
+- NEVER use bare `open()` — use `rasterio.MemoryFile(bytes)` to read rasters from downloaded bytes.
+- NEVER reproject to UTM — use degree-based math for area calculation.
+- `rasterio.open(path, 'w', ...)` IS allowed (it's a module method, not bare open).
+- `plt.savefig(...)` IS allowed.
+
+OUTPUTS (MANDATORY — produce ALL of these):
+- PNG: `./exports/deforestation_map.png` — spatial visualization of tree cover loss areas
+- GeoJSON: `./exports/deforestation_navalgund.geojson` — vectorized loss polygons with area in hectares
+- If user also asks for degradation: `./exports/degradation_navalgund.geojson`
 
 FALLBACK: If custom time period (e.g., "2018-2024"):
 - Use land_use_land_cover_raster for specific years
@@ -1530,13 +1586,23 @@ FIRST STEP after fetching: Print all layer names: `for l in vector_layers: print
 
 CoreStack provides pre-computed change detection layers covering 2017-2022. Use these for change queries instead of computing from raw LULC:
 
-a) **change_tree_cover_loss_raster**: Tree cover loss 2017-2022
-   - Class values: 0 = No change, 1 = Tree loss
-   - Use for: "tree cover loss since 2018", "deforestation"
+⚠️ IMPORTANT: The internal product names (change_tree_cover_loss_raster etc.) do NOT match the actual API layer names!
+The ACTUAL layer names from the API are formatted as: `"Change Detection Raster (change_<district>_<tehsil>_<Type>)"`
+Examples for Navalgund, Dharwad:
+   - Deforestation: `"Change Detection Raster (change_dharwad_navalgund_Deforestation)"` — match: `'deforestation' in name.lower()`
+   - Afforestation: `"Change Detection Raster (change_dharwad_navalgund_Afforestation)"` — match: `'afforestation' in name.lower()`
+   - Degradation:   `"Change Detection Raster (change_dharwad_navalgund_Degradation)"` — match: `'degradation' in name.lower()`
+   - Overall tree:  `"Tree Overall Change Raster (overall_change_raster_dharwad_navalgund)"` — match: `'tree overall' in name.lower()`
+
+a) **Deforestation raster** (tree cover loss) 2017-2022:
+   - ACTUAL API name: `"Change Detection Raster (change_dharwad_navalgund_Deforestation)"`
+   - Match with: `'deforestation' in layer['layer_name'].lower()`
+   - Use for: "tree cover loss since 2018", "deforestation", "lost tree cover"
    - MASK to class 1 to get loss areas
 
-b) **change_tree_cover_gain_raster**: Tree cover gain 2017-2022
-   - Class values: 0 = No change, 1 = Tree gain
+b) **Afforestation raster** (tree cover gain) 2017-2022:
+   - ACTUAL API name: `"Change Detection Raster (change_dharwad_navalgund_Afforestation)"`
+   - Match with: `'afforestation' in layer['layer_name'].lower()`
    - Use for: "tree cover gain", "reforestation"
    - MASK to class 1 to get gain areas
 
@@ -1613,61 +1679,288 @@ For multi-region layers: Read ALL URLs, concat GeoDataFrames, then analyze.
 		vector_layers = data['spatial_data']['vector_layers']
 		raster_layers = data['spatial_data']['raster_layers']
 
-		# EXAMPLE 1: TEMPORAL VECTOR (Cropping Intensity Over Years)
+		# ╔══════════════════════════════════════════════════════════════╗
+		# ║ EXAMPLE 1: CROPPING INTENSITY OVER YEARS (Vector)            ║
+		# ║ ⚠️ For Query Type 1, COPY THIS CODE ALMOST VERBATIM.         ║
+		# ║ Produces: time-series PNG + per-MWS GeoJSON                  ║
+		# ╚══════════════════════════════════════════════════════════════╝
+		# FIRST: Print all vector layer names to find the right one
+		print("Available vector layers:")
 		for layer in vector_layers:
-			if 'Cropping Intensity' in layer['layer_name']:
-				# Handle multi-region: Read all URLs and concat
+			print(f"  - {{layer['layer_name']}}")
+
+		# Step 1: Find cropping intensity layer (case-insensitive substring match)
+		crop_gdf = None
+		for layer in vector_layers:
+			if 'cropping' in layer['layer_name'].lower() and 'intensity' in layer['layer_name'].lower():
+				print(f"Found cropping intensity layer: {{layer['layer_name']}}")
 				all_gdfs = []
 				for url_info in layer['urls']:
 					gdf = gpd.read_file(url_info['url'])
 					all_gdfs.append(gdf)
+				crop_gdf = pd.concat(all_gdfs, ignore_index=True)
+				break
 
-				# Merge all regions
-				merged_gdf = pd.concat(all_gdfs, ignore_index=True)
+		if crop_gdf is not None:
+			print(f"Cropping intensity GDF columns: {{crop_gdf.columns.tolist()}}")
+			print(f"Cropping intensity GDF shape: {{crop_gdf.shape}}")
 
-				# CRITICAL: Extract years from column names (e.g., 'cropping_intensity_2017')
-				import re
-				year_cols = [col for col in merged_gdf.columns if 'cropping_intensity_' in col and re.search(r'\\d{{4}}', col)]
+			# Step 2: Extract year columns (e.g., 'cropping_intensity_2017')
+			import re
+			year_cols = [col for col in crop_gdf.columns if 'cropping_intensity_' in col.lower() and re.search(r'\\d{{4}}', col)]
+			year_cols = sorted(year_cols)
+			print(f"Year columns found: {{year_cols}}")
 
-				# Parse year from column name: 'cropping_intensity_2017' -> 2017
+			# Step 3: Compute average CI per year across ALL MWS
+			years_data = []
+			for col in year_cols:
+				year_match = re.search(r'(\\d{{4}})', col)
+				if year_match:
+					year = int(year_match.group(1))
+					avg_value = crop_gdf[col].mean()
+					years_data.append((year, avg_value))
+			years_data.sort()
+			years_list = [y[0] for y in years_data]
+			values_list = [y[1] for y in years_data]
+			print(f"Years: {{years_list}}")
+			print(f"Values: {{values_list}}")
+
+			# Step 4: Plot time-series PNG
+			import matplotlib
+			matplotlib.use('Agg')
+			import matplotlib.pyplot as plt
+			fig, ax = plt.subplots(figsize=(10, 6))
+			ax.plot(years_list, values_list, marker='o', linewidth=2, color='#3b82f6')
+			ax.fill_between(years_list, values_list, alpha=0.15, color='#3b82f6')
+			ax.set_xlabel('Year', fontsize=12)
+			ax.set_ylabel('Average Cropping Intensity', fontsize=12)
+			ax.set_title('Cropping Intensity Over Years — Navalgund, Dharwad', fontsize=14)
+			ax.grid(True, alpha=0.3)
+			ax.set_xticks(years_list)
+			plt.tight_layout()
+			plt.savefig('./exports/cropping_intensity_over_years.png', dpi=150, bbox_inches='tight')
+			plt.close()
+			print("Saved: ./exports/cropping_intensity_over_years.png")
+
+			# Step 5: Compute per-MWS mean CI and export GeoJSON
+			crop_gdf['mean_ci'] = crop_gdf[year_cols].mean(axis=1)
+			export_cols = ['geometry', 'mean_ci'] + year_cols
+			if 'uid' in crop_gdf.columns:
+				export_cols = ['uid'] + export_cols
+			crop_export = crop_gdf[[c for c in export_cols if c in crop_gdf.columns]]
+			crop_export.to_file('./exports/cropping_intensity_by_mws.geojson', driver='GeoJSON')
+			print(f"Saved: ./exports/cropping_intensity_by_mws.geojson ({{len(crop_export)}} MWS)")
+
+			final_answer(f"Cropping intensity trend plotted for {{len(years_list)}} years ({{years_list[0]}}–{{years_list[-1]}}). Average CI ranged from {{min(values_list):.2f}} to {{max(values_list):.2f}}.\\n\\nExports:\\n- ./exports/cropping_intensity_over_years.png\\n- ./exports/cropping_intensity_by_mws.geojson")
+		else:
+			print("ERROR: Could not find Cropping Intensity layer!")
+			final_answer("Could not find Cropping Intensity layer from CoreStack data.")
+
+		# ╔══════════════════════════════════════════════════════════════╗
+		# ║ EXAMPLE 1b: SURFACE WATER AVAILABILITY OVER YEARS (Vector)  ║
+		# ║ ⚠️ For Query Type 2, COPY THIS CODE ALMOST VERBATIM.         ║
+		# ║ Produces: time-series PNG + per-MWS GeoJSON                  ║
+		# ╚══════════════════════════════════════════════════════════════╝
+		# FIRST: Print all vector layer names to find the right one
+		print("Available vector layers:")
+		for layer in vector_layers:
+			print(f"  - {{layer['layer_name']}}")
+
+		# Step 1: Find surface water bodies layer (NOT the ZOI one)
+		sw_gdf = None
+		for layer in vector_layers:
+			lname = layer['layer_name'].lower()
+			if 'surface water' in lname and 'zoi' not in lname:
+				print(f"Found surface water layer: {{layer['layer_name']}}")
+				all_gdfs = []
+				for url_info in layer['urls']:
+					gdf = gpd.read_file(url_info['url'])
+					all_gdfs.append(gdf)
+				sw_gdf = pd.concat(all_gdfs, ignore_index=True)
+				break
+
+		if sw_gdf is not None:
+			import numpy as np
+			print(f"Surface water GDF columns: {{sw_gdf.columns.tolist()}}")
+			print(f"Surface water GDF shape: {{sw_gdf.shape}}")
+
+			# Step 2: Identify area columns (pattern: area_YY-YY)
+			import re
+			area_cols = [col for col in sw_gdf.columns if re.match(r'area_\\d{{2}}-\\d{{2}}', col)]
+			area_cols = sorted(area_cols)
+			print(f"Area columns found: {{area_cols}}")
+
+			# Step 3: Aggregate by MWS_UID (sum water body areas per MWS per year)
+			if 'MWS_UID' in sw_gdf.columns:
+				# Convert area cols to numeric
+				for col in area_cols:
+					sw_gdf[col] = pd.to_numeric(sw_gdf[col], errors='coerce').fillna(0)
+
+				sw_by_mws = sw_gdf.groupby('MWS_UID')[area_cols].sum().reset_index()
+				print(f"Aggregated to {{len(sw_by_mws)}} MWS")
+
+				# Step 4: Compute total water area per year across all MWS
 				years_data = []
-				for col in sorted(year_cols):
-					year_match = re.search(r'(\\d{{4}})', col)
-					if year_match:
-						year = int(year_match.group(1))
-						avg_value = merged_gdf[col].mean()
-						years_data.append((year, avg_value))
-
-				# Sort by year and plot
+				for col in area_cols:
+					# Extract hydro-year label: area_17-18 → "2017-18"
+					m = re.search(r'(\\d{{2}})-(\\d{{2}})', col)
+					if m:
+						yr_start = 2000 + int(m.group(1))
+						total_area = sw_by_mws[col].sum()
+						years_data.append((yr_start, total_area, col))
 				years_data.sort()
 				years_list = [y[0] for y in years_data]
-				values_list = [y[1] for y in years_data]
-
-				import matplotlib.pyplot as plt
-				plt.figure(figsize=(10, 6))
-				plt.plot(years_list, values_list, marker='o')
-				plt.xlabel('Year')
-				plt.ylabel('Average Cropping Intensity')
-				plt.title('Cropping Intensity Over Years')
-				plt.savefig('./exports/cropping_intensity_over_years.png')
+				area_list = [y[1] for y in years_data]
+				labels_list = [f"{{y[0]}}-{{str(y[0]+1)[-2:]}}" for y in years_data]
 				print(f"Years: {{years_list}}")
-				print(f"Values: {{values_list}}")
+				print(f"Total areas (ha): {{[round(a, 2) for a in area_list]}}")
 
-		# EXAMPLE 2: CHANGE DETECTION RASTER (Tree Cover Loss)
+				# Step 5: Plot time-series PNG
+				import matplotlib
+				matplotlib.use('Agg')
+				import matplotlib.pyplot as plt
+				fig, ax = plt.subplots(figsize=(10, 6))
+				ax.plot(years_list, area_list, marker='s', linewidth=2, color='#06b6d4')
+				ax.fill_between(years_list, area_list, alpha=0.15, color='#06b6d4')
+				ax.set_xlabel('Hydro-Year Start', fontsize=12)
+				ax.set_ylabel('Total Surface Water Area (hectares)', fontsize=12)
+				ax.set_title('Surface Water Availability Over Years — Navalgund, Dharwad', fontsize=14)
+				ax.grid(True, alpha=0.3)
+				ax.set_xticks(years_list)
+				ax.set_xticklabels(labels_list, rotation=30, ha='right')
+				plt.tight_layout()
+				plt.savefig('./exports/surface_water_trend.png', dpi=150, bbox_inches='tight')
+				plt.close()
+				print("Saved: ./exports/surface_water_trend.png")
+
+				# Step 6: Build per-MWS GeoJSON export
+				# Get one representative geometry per MWS from the original sw_gdf (dissolve)
+				sw_dissolved = sw_gdf.dissolve(by='MWS_UID', aggfunc='sum').reset_index()
+				export_cols_sw = ['MWS_UID', 'geometry'] + area_cols
+				sw_export = sw_dissolved[[c for c in export_cols_sw if c in sw_dissolved.columns]]
+				sw_export.to_file('./exports/surface_water_availability_by_mws.geojson', driver='GeoJSON')
+				print(f"Saved: ./exports/surface_water_availability_by_mws.geojson ({{len(sw_export)}} MWS)")
+
+				final_answer(f"Surface water trend plotted for {{len(years_list)}} years. Total water area ranged from {{min(area_list):.1f}} to {{max(area_list):.1f}} hectares.\\n\\nExports:\\n- ./exports/surface_water_trend.png\\n- ./exports/surface_water_availability_by_mws.geojson")
+			else:
+				print("ERROR: MWS_UID column not found in surface water data!")
+				final_answer("Could not aggregate surface water data — MWS_UID column not found.")
+		else:
+			print("ERROR: Could not find Surface Water Bodies layer!")
+			final_answer("Could not find Surface Water Bodies layer from CoreStack data.")
+
+		# ╔══════════════════════════════════════════════════════════════╗
+		# ║ EXAMPLE 2: TREE COVER LOSS / DEFORESTATION (Raster)          ║
+		# ║ ⚠️ For Query Type 3, COPY THIS CODE ALMOST VERBATIM.         ║
+		# ║ ⚠️ NEVER use bare open() — use rasterio.MemoryFile(bytes).   ║
+		# ║ ⚠️ NEVER reproject to UTM — use degree-based math for area.  ║
+		# ║ Produces: deforestation map PNG + loss polygons GeoJSON       ║
+		# ╚══════════════════════════════════════════════════════════════╝
+		import os, requests, rasterio, numpy as np, math
+		from rasterio.features import shapes as rio_shapes
+		from shapely.geometry import shape as shp_shape
+		os.makedirs('./exports', exist_ok=True)
+
+		# FIRST: Print all raster layer names to find the right one
+		print("Available raster layers:")
 		for layer in raster_layers:
-			if 'Change Tree Cover Loss' in layer['layer_name']:
-				import rasterio
-				# For rasters, typically use first URL (single region or mosaic)
-				url = layer['urls'][0]['url']
-				with rasterio.open(url) as src:
+			print(f"  - {{layer['layer_name']}}")
+
+		# Step 1: Find deforestation raster (case-insensitive substring match)
+		# ⚠️ The ACTUAL layer name is "Change Detection Raster (change_dharwad_navalgund_Deforestation)"
+		#    — it contains 'deforestation', NOT 'tree cover loss'!
+		loss_layer = None
+		for layer in raster_layers:
+			lname = layer['layer_name'].lower()
+			if 'deforestation' in lname:
+				loss_layer = layer
+				print(f"Found deforestation layer: {{layer['layer_name']}}")
+				break
+		# Fallback: try 'tree' + 'overall' + 'change'
+		if loss_layer is None:
+			for layer in raster_layers:
+				lname = layer['layer_name'].lower()
+				if 'tree' in lname and 'overall' in lname and 'change' in lname:
+					loss_layer = layer
+					print(f"Found tree overall change layer: {{layer['layer_name']}}")
+					break
+
+		if loss_layer is not None:
+			# Step 2: Download raster bytes (sandbox-safe: use MemoryFile, NOT bare open())
+			url = loss_layer['urls'][0]['url']
+			print(f"Downloading: {{url[:100]}}...")
+			r_bytes = requests.get(url, timeout=120).content
+			print(f"Downloaded: {{len(r_bytes)}} bytes")
+
+			with rasterio.MemoryFile(r_bytes) as memfile:
+				with memfile.open() as src:
 					loss_data = src.read(1)
-					# Mask to class 1 (loss areas)
-					loss_mask = (loss_data == 1)
-					loss_area_pixels = loss_mask.sum()
-					# Convert to hectares using pixel size
-					pixel_area = src.transform[0] * abs(src.transform[4])
-					loss_area_ha = loss_area_pixels * pixel_area / 10000
-					print(f"Tree cover loss: {{loss_area_ha:.2f}} hectares")
+					transform = src.transform
+					crs = src.crs
+					bounds = src.bounds
+
+					# Step 3: Mask to loss class (class == 1)
+					loss_data_clean = np.nan_to_num(loss_data, nan=0)
+					loss_mask = (loss_data_clean == 1).astype(np.uint8)
+					loss_pixels = int(loss_mask.sum())
+					print(f"Tree cover loss pixels: {{loss_pixels}}")
+
+					# Step 4: Compute area using degree-based math (NEVER UTM reproject)
+					dx_deg = abs(transform[0])
+					dy_deg = abs(transform[4])
+					center_lat = (bounds.bottom + bounds.top) / 2
+					m_per_deg_lat = 110540.0
+					m_per_deg_lon = 111320.0 * math.cos(math.radians(center_lat))
+					px_area_ha = (dx_deg * m_per_deg_lon) * (dy_deg * m_per_deg_lat) / 10000
+					loss_area_ha = loss_pixels * px_area_ha
+					print(f"Tree cover loss area: {{loss_area_ha:.2f}} hectares ({{px_area_ha:.6f}} ha/px)")
+
+					# Step 5: Create visualization PNG
+					import matplotlib
+					matplotlib.use('Agg')
+					import matplotlib.pyplot as plt
+					from matplotlib.colors import ListedColormap
+
+					fig, ax = plt.subplots(figsize=(10, 10))
+					# Background: no-loss in dark grey, loss in red
+					display_data = np.where(loss_mask == 1, 2, np.where(loss_data_clean > 0, 1, 0))
+					cmap = ListedColormap(['#1a1a2e', '#2d3436', '#e74c3c'])
+					ax.imshow(display_data, cmap=cmap, extent=[bounds.left, bounds.right, bounds.bottom, bounds.top])
+					ax.set_title(f'Tree Cover Loss — Navalgund, Dharwad\\n({{loss_area_ha:.1f}} hectares lost)', fontsize=14)
+					ax.set_xlabel('Longitude')
+					ax.set_ylabel('Latitude')
+					# Legend
+					from matplotlib.patches import Patch
+					legend_elements = [Patch(facecolor='#e74c3c', label=f'Loss ({{loss_area_ha:.1f}} ha)'),
+					                   Patch(facecolor='#2d3436', label='No change')]
+					ax.legend(handles=legend_elements, loc='lower right', fontsize=10)
+					plt.tight_layout()
+					plt.savefig('./exports/deforestation_map.png', dpi=150, bbox_inches='tight')
+					plt.close()
+					print("Saved: ./exports/deforestation_map.png")
+
+					# Step 6: Vectorize loss pixels → GeoJSON polygons
+					loss_polys = []
+					for geom, val in rio_shapes(loss_mask, transform=transform):
+						if val == 1:
+							loss_polys.append(shp_shape(geom))
+
+					if loss_polys:
+						loss_gdf = gpd.GeoDataFrame(
+							{{'loss_type': ['tree_cover_loss'] * len(loss_polys),
+							  'area_ha': [p.area * m_per_deg_lon * m_per_deg_lat / 10000 for p in loss_polys]}},
+							geometry=loss_polys,
+							crs=crs
+						)
+						loss_gdf.to_file('./exports/deforestation_navalgund.geojson', driver='GeoJSON')
+						print(f"Saved: ./exports/deforestation_navalgund.geojson ({{len(loss_gdf)}} polygons)")
+					else:
+						print("No loss polygons to vectorize")
+
+					final_answer(f"Tree cover loss analysis complete: {{loss_area_ha:.1f}} hectares of forest lost in Navalgund, Dharwad.\\n\\nExports:\\n- ./exports/deforestation_map.png\\n- ./exports/deforestation_navalgund.geojson")
+		else:
+			print("ERROR: Could not find tree cover loss raster layer!")
+			final_answer("Could not find tree cover loss raster from CoreStack data.")
 
 		# ╔══════════════════════════════════════════════════════════════╗
 		# ║ EXAMPLE 2b: CROPLAND → BUILT-UP CHANGE DETECTION             ║
@@ -3779,112 +4072,108 @@ def run_hybrid_agent(user_query: str, exports_dir: str = None, session_id: str =
 # EXAMPLE USAGE & COMPARISON
 # ============================================================================
 
-if __name__ == "__main__":
-	"""
-	Example usage of the hybrid agent.
+# if __name__ == "__main__":
+# 	"""
+# 	Example usage of the hybrid agent.
 
-	All queries in this run share one Langfuse session so they appear as a
-	single conversation in the dashboard.  Each run_hybrid_agent() call
-	creates its own trace within that session.
-	"""
-	print("Bot TEST")
-	print("="*70)
+# 	All queries in this run share one Langfuse session so they appear as a
+# 	single conversation in the dashboard.  Each run_hybrid_agent() call
+# 	creates its own trace within that session.
+# 	"""
+# 	print("Bot TEST")
+# 	print("="*70)
 
-	# Create a single session ID to group all traces from this run
-	_session_id = generate_session_id()
-	print(f"📊 Langfuse session ID: {_session_id}")
+# 	# Create a single session ID to group all traces from this run
+# 	_session_id = generate_session_id()
+# 	print(f"📊 Langfuse session ID: {_session_id}")
 
-	print("Running query #1 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
-	print("="*70)
+# 	print("Running query #1 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+# 	print("="*70)
 
-	try:
-		result = run_hybrid_agent(
-			"Could you show how cropping intensity has changed over the years in Navalgund, Dharwad, Karnataka?",
-			session_id=_session_id,
-			user_id="dev-test",
-		)
+# 	try:
+# 		result = run_hybrid_agent(
+# 			"Could you show how cropping intensity has changed over the years in Navalgund, Dharwad, Karnataka?",
+# 			session_id=_session_id,
+# 			user_id="dev-test",
+# 		)
 
-		# ── Example: record user feedback after agent finishes ──
-		# In production this would come from a UI callback.
-		# score_trace(name="user_feedback", value=1.0, data_type="NUMERIC",
-		#             comment="Correct answer")
+# 		# ── Example: record user feedback after agent finishes ──
+# 		# In production this would come from a UI callback.
+# 		# score_trace(name="user_feedback", value=1.0, data_type="NUMERIC",
+# 		#             comment="Correct answer")
 
-	except Exception:
-		pass  # error already logged to Langfuse inside run_hybrid_agent
+# 	except Exception:
+# 		pass  # error already logged to Langfuse inside run_hybrid_agent
 
-	finally:
-		# Ensure all buffered events reach Langfuse before exit
-		lf_shutdown()
+# 	finally:
+# 		# Ensure all buffered events reach Langfuse before exit
+# 		lf_shutdown()
 
-	# print("Running query #2 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
-	# print("="*70)
-	# run_hybrid_agent("Could you show how surface water availability has changed over the years in Navalgund, Dharwad, Karnataka?")
+# 	# print("Running query #2 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+# 	# print("="*70)
+# 	# run_hybrid_agent("Could you show how surface water availability has changed over the years in Navalgund, Dharwad, Karnataka?")
 
-	# print("Running query #3 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
-	# print("="*70)
-	# run_hybrid_agent("Can you show me areas that have lost tree cover in Navalgund, Dharwad, Karnataka since 2018? also hectares of degraded area?")
+# 	# print("Running query #3 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+# 	# print("="*70)
+# 	# run_hybrid_agent("Can you show me areas that have lost tree cover in Navalgund, Dharwad, Karnataka since 2018? also hectares of degraded area?")
 
-	# print("Running query #4 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
-	# print("="*70)
-	# run_hybrid_agent("How much cropland in Navalgund, Dharwad, Karnataka has turned into built up since 2018? can you show me those regions?")
+# 	# print("Running query #4 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+# 	# print("="*70)
+# 	# run_hybrid_agent("How much cropland in Navalgund, Dharwad, Karnataka has turned into built up since 2018? can you show me those regions?")
 
-    # print("Running query #5 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
-	# print("="*70)
-	# run_hybrid_agent("Which villages in Navalgund, Dharwad Karnataka among the ones available on Core Stack have experienced droughts? ")
+#     # print("Running query #5 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+# 	# print("="*70)
+# 	# run_hybrid_agent("Which villages in Navalgund, Dharwad Karnataka among the ones available on Core Stack have experienced droughts? ")
 
-	# print("Running query #6 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
-	# print("="*70)
-	# run_hybrid_agent("find all microwatersheds in Navalgund tehsil, Dharwad district in Karnataka, with highest cropping senstivity to drought")
+# 	# print("Running query #6 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+# 	# print("="*70)
+# 	# run_hybrid_agent("find all microwatersheds in Navalgund tehsil, Dharwad district in Karnataka, with highest cropping senstivity to drought")
 
-	# print("Running query #7 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
-	# print("="*70)
-	# run_hybrid_agent("find all microwatersheds in Navalgund tehsil, Dharwad district in Karnataka, with highest surface water availability senstivity to drought")
-
-
-	# print("Running query #8 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
-	# print("="*70)
-	# run_hybrid_agent("find me microwatersheds in Navalgund tehsil, Dharwad district, Karnataka most similar to 18_16157 uid microwatershed, based on its terrain, drought frequency, LULC and cropping intensity")
+# 	# print("Running query #7 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+# 	# print("="*70)
+# 	# run_hybrid_agent("find all microwatersheds in Navalgund tehsil, Dharwad district in Karnataka, with highest surface water availability senstivity to drought")
 
 
-	# print("Running query #9 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
-	# print("="*70)
-	# run_hybrid_agent("find me microwatersheds most similar to 18_16157 id microwatershed in Navalgund, Dharwad, Karnataka, based on its terrain, drought frequency, and LULC using propensity score matching")
+# 	# print("Running query #8 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+# 	# print("="*70)
+# 	# run_hybrid_agent("find me microwatersheds in Navalgund tehsil, Dharwad district, Karnataka most similar to 18_16157 uid microwatershed, based on its terrain, drought frequency, LULC and cropping intensity")
 
 
-	# print("Running query #10 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
-	# print("="*70)
-	# run_hybrid_agent("From the top-K earlier identified drought-sensitive and surface-water-sensitive microwatersheds in Navalgund, Dharwad, Karnataka, rank them based on their cropping intensity and surface water availability. Use weighted score: cropping_score = 3*triple_crop + 2*double_crop + 1*(single_kharif + single_non_kharif). Water score = 3*perennial_water + 2*winter_water + 1*monsoon_water. Read past exports from ./exports/ to get the MWS UIDs.")
-
-	# print("Running query #11 from CSV (Navalgund, Dharwad, Karnataka)...")
-	# print("="*70)
-	# run_hybrid_agent("In my Navalgund tehsil of Dharwad, Karnataka, compare the SC/ST% population of villages against the number of NREGA works done in the villages. Build a scatter plot.")
-
-	# print("Running query #12 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
-	# print("="*70)
-	# run_hybrid_agent("My tehsil navalgund of Dharwad, Karnataka is quite groundwater stressed. Find the top micro-watersheds that have high cropping intensity as well as a large rainfall runoff volume that can be harvested. Similarly, find those micro-watersheds that have a low cropping intensity but high runoff volume. Essentially build a neat scatterplot split into four quadrants of high/low cropping intensity and high/low runoff")
+# 	# print("Running query #9 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+# 	# print("="*70)
+# 	# run_hybrid_agent("find me microwatersheds most similar to 18_16157 id microwatershed in Navalgund, Dharwad, Karnataka, based on its terrain, drought frequency, and LULC using propensity score matching")
 
 
-    # print("Running query #7 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
-	# print("="*70)
-	# run_hybrid_agent("find all microwatersheds in Navalgund tehsil, Dharwad district in Karnataka, with highest surface water availability senstivity to drought")
+# 	# print("Running query #10 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+# 	# print("="*70)
+# 	# run_hybrid_agent("From the top-K earlier identified drought-sensitive and surface-water-sensitive microwatersheds in Navalgund, Dharwad, Karnataka, rank them based on their cropping intensity and surface water availability. Use weighted score: cropping_score = 3*triple_crop + 2*double_crop + 1*(single_kharif + single_non_kharif). Water score = 3*perennial_water + 2*winter_water + 1*monsoon_water. Read past exports from ./exports/ to get the MWS UIDs.")
 
-	# print("Running query #13 from CSV (Navalgund, Dharwad, Karnataka)...")
-	# print("="*70)
-	# run_hybrid_agent("For my tehsil Navalgund of Dharwad, Karnataka, can you create a scatterplot of average monsoon temperatures to cropping intensity?")
+# 	# print("Running query #11 from CSV (Navalgund, Dharwad, Karnataka)...")
+# 	# print("="*70)
+# 	# run_hybrid_agent("In my Navalgund tehsil of Dharwad, Karnataka, compare the SC/ST% population of villages against the number of NREGA works done in the villages. Build a scatter plot.")
 
-	# print("Running query #14 from CSV (Navalgund, Dharwad, Karnataka)...")
-	# print("="*70)
-	# run_hybrid_agent("For my microwatershed 18_16157 in Navalgund, Dharwad, Karnataka, can you find out regions with similar phenological cycles during the years 2019 to 2020, and show per month which regions are in the same phenological stage? Use Sentinel-2 NDVI and MWS boundaries to compute NDVI time series and use phenological stage detection algorithm.")
+# 	# print("Running query #12 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+# 	# print("="*70)
+# 	# run_hybrid_agent("My tehsil navalgund of Dharwad, Karnataka is quite groundwater stressed. Find the top micro-watersheds that have high cropping intensity as well as a large rainfall runoff volume that can be harvested. Similarly, find those micro-watersheds that have a low cropping intensity but high runoff volume. Essentially build a neat scatterplot split into four quadrants of high/low cropping intensity and high/low runoff")
 
-	# print("Running query #15 from CSV (Navalgund, Dharwad, Karnataka)...")
-	# print("="*70)
-	# run_hybrid_agent("For the microwatersheds in Navalgund, Dharwad, Karnataka identified in the phenological stage analysis, create a scatterplot of runoff accumulation per phenological stage vs cropping intensity. Use the Drought vector rd columns for weekly runoff data, sum them per month, then accumulate per phenological stage per MWS. Plot against cropping intensity from the Cropping Intensity vector for years 2019-2020. Color by phenological stage.")
 
-	# print("Running query #16 from CSV (Navalgund, Dharwad, Karnataka)...")
-	# print("="*70)
-	# run_hybrid_agent("For my Navalgund tehsil in Dharwad, Karnataka, test the hypothesis that villages with higher average temperature have higher cropping intensity. Compute per-MWS average Land Surface Temperature from Landsat 8 and cropping intensity from CoreStack, build a scatterplot, and perform hypothesis testing (Pearson correlation + t-test on hot vs cool groups).")
+# 	# print("Running query #13 from CSV (Navalgund, Dharwad, Karnataka)...")
+# 	# print("="*70)
+# 	# run_hybrid_agent("For my tehsil Navalgund of Dharwad, Karnataka, can you create a scatterplot of average monsoon temperatures to cropping intensity?")
 
-	# print("Running query #17 from CSV (Navalgund, Dharwad, Karnataka)...")
-	# print("="*70)
-	# run_hybrid_agent("For my Navalgund tehsil in Dharwad, Karnataka, rank microwatersheds by a composite Agricultural Suitability Index considering temperature (Landsat 8 LST), cropping intensity (CoreStack CI vector), and surface water availability during the growing phenological stage (kharif season from Surface Water Bodies vector). Use weighted linear combination: ASI = 0.40*CI_norm + 0.30*(1-LST_norm) + 0.30*SW_norm. Export ranked bar chart and GeoJSON.")
+# 	# print("Running query #14 from CSV (Navalgund, Dharwad, Karnataka)...")
+# 	# print("="*70)
+# 	# run_hybrid_agent("For my microwatershed 18_16157 in Navalgund, Dharwad, Karnataka, can you find out regions with similar phenological cycles during the years 2019 to 2020, and show per month which regions are in the same phenological stage? Use Sentinel-2 NDVI and MWS boundaries to compute NDVI time series and use phenological stage detection algorithm.")
+
+# 	# print("Running query #15 from CSV (Navalgund, Dharwad, Karnataka)...")
+# 	# print("="*70)
+# 	# run_hybrid_agent("For the microwatersheds in Navalgund, Dharwad, Karnataka identified in the phenological stage analysis, create a scatterplot of runoff accumulation per phenological stage vs cropping intensity. Use the Drought vector rd columns for weekly runoff data, sum them per month, then accumulate per phenological stage per MWS. Plot against cropping intensity from the Cropping Intensity vector for years 2019-2020. Color by phenological stage.")
+
+# 	# print("Running query #16 from CSV (Navalgund, Dharwad, Karnataka)...")
+# 	# print("="*70)
+# 	# run_hybrid_agent("For my Navalgund tehsil in Dharwad, Karnataka, test the hypothesis that villages with higher average temperature have higher cropping intensity. Compute per-MWS average Land Surface Temperature from Landsat 8 and cropping intensity from CoreStack, build a scatterplot, and perform hypothesis testing (Pearson correlation + t-test on hot vs cool groups).")
+
+# 	# print("Running query #17 from CSV (Navalgund, Dharwad, Karnataka)...")
+# 	# print("="*70)
+# 	# run_hybrid_agent("For my Navalgund tehsil in Dharwad, Karnataka, rank microwatersheds by a composite Agricultural Suitability Index considering temperature (Landsat 8 LST), cropping intensity (CoreStack CI vector), and surface water availability during the growing phenological stage (kharif season from Surface Water Bodies vector). Use weighted linear combination: ASI = 0.40*CI_norm + 0.30*(1-LST_norm) + 0.30*SW_norm. Export ranked bar chart and GeoJSON.")
 

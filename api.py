@@ -1,58 +1,47 @@
 """
-CoreStack Hybrid Agent — FastAPI Server
-========================================
+CoreStack Agent — FastAPI Backend
+==================================
 
-Production-ready REST + WebSocket API that exposes the SmolAgents CodeAgent
-pipeline and serves all generated exports (GeoJSON, PNG, TIFF, TXT).
+Real-time SSE + WebSocket streaming, dynamic export serving, structured
+logging, and dashboard-ready endpoints.
 
-Run:
-    uvicorn api:app --host 0.0.0.0 --port 8000 --reload
-
-Endpoints overview:
-───────────────────
-POST   /query                  → Submit a new agent query (async background task)
-GET    /query/{query_id}       → Poll query status & result
-WS     /ws/query               → WebSocket for real-time streaming output
-GET    /exports                → List all export files with metadata
-GET    /exports/{filename}     → Download / stream a single export file
-GET    /exports/{filename}/preview → Preview GeoJSON as JSON, PNG as base64
-DELETE /exports/{filename}     → Delete an export file
-GET    /sessions               → List Langfuse sessions
-GET    /sessions/{session_id}  → Get traces for a session
-POST   /feedback               → Submit user feedback (thumbs up/down)
-GET    /health                 → Health check
-GET    /config                 → Current configuration (non-secret)
-
-Output types handled (based on all 17 query outputs):
-─────────────────────────────────────────────────────
-  .geojson  → Spatial vector data (cropping intensity, drought, deforestation …)
-  .png      → Charts, scatter plots, heatmaps, bar charts
-  .tif      → Raster data (LULC, change detection)
-  .txt      → Execution logs / text reports
+Endpoints
+---------
+POST /api/query                 → submit a query (returns query_id)
+GET  /api/query/{id}            → poll status / result
+GET  /api/query/{id}/stream     → SSE stream (logs + result + exports)
+GET  /api/query/{id}/logs       → filtered execution logs
+GET  /api/queries               → list recent queries
+GET  /api/exports               → list all export files (PNG/GeoJSON/TIF…)
+GET  /api/exports/{file}        → serve an export file
+GET  /api/exports/{file}/preview→ inline preview (base64 image / parsed JSON)
+GET  /api/health                → health check
+WS   /ws/query                  → WebSocket: send query → receive live stream
 """
 
 from __future__ import annotations
 
 import asyncio
 import base64
-import glob
+import io
 import json
+import logging
 import mimetypes
 import os
+import re
+import sys
+import threading
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
-from enum import Enum
+from collections import OrderedDict
+from contextlib import redirect_stdout
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
-from dotenv import load_dotenv
 from fastapi import (
-    BackgroundTasks,
     FastAPI,
     HTTPException,
-    Query,
     WebSocket,
     WebSocketDisconnect,
 )
@@ -60,1057 +49,788 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-load_dotenv()
+# ═══════════════════════════════════════════════════════════════════════════════
+# LOGGING
+# ═══════════════════════════════════════════════════════════════════════════════
 
-# ============================================================================
-# App initialization
-# ============================================================================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s │ %(levelname)-7s │ %(name)s │ %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger("corestack.api")
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PATHS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+EXPORTS_DIR = os.path.join(_BASE_DIR, "exports")
+os.makedirs(EXPORTS_DIR, exist_ok=True)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# FASTAPI APP
+# ═══════════════════════════════════════════════════════════════════════════════
 
 app = FastAPI(
-    title="CoreStack Hybrid Agent API",
-    description=(
-        "REST + WebSocket API for the SmolAgents-based geospatial analysis agent. "
-        "Submit natural-language queries, poll results, stream real-time output, "
-        "download exports (GeoJSON / PNG / TIFF), and provide feedback."
-    ),
+    title="CoreStack Agent API",
+    description="Backend for the CoreStack Hybrid Geospatial Agent – "
+                "streams execution in real time, serves exported artefacts.",
     version="1.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc",
 )
 
-# ── CORS (allow any origin in dev; lock down in production) ──────────────────
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.getenv("CORS_ORIGINS", "*").split(","),
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ── Paths ────────────────────────────────────────────────────────────────────
-BASE_DIR = Path(__file__).resolve().parent
-EXPORTS_DIR = BASE_DIR / "exports"
-EXPORTS_DIR.mkdir(exist_ok=True)
+# ═══════════════════════════════════════════════════════════════════════════════
+# IMPORT BACKEND  (main.py + langfuse)
+# ═══════════════════════════════════════════════════════════════════════════════
 
-# ── Thread pool for running the synchronous agent in a background thread ─────
-_executor = ThreadPoolExecutor(max_workers=int(os.getenv("AGENT_WORKERS", "2")))
+from main import run_hybrid_agent  # noqa: E402
+from langfuse_observability import (  # noqa: E402
+    generate_session_id,
+    flush as lf_flush,
+    shutdown as lf_shutdown,
+)
 
-
-# ============================================================================
-# Lazy imports (avoid heavy startup cost for health-check requests)
-# ============================================================================
-
-_main_module = None
-
-
-def _get_main():
-    """Import main.py lazily so that EE / Langfuse / model init happens once."""
-    global _main_module
-    if _main_module is None:
-        import main as _m
-        _main_module = _m
-    return _main_module
-
-
-# ============================================================================
-# Pydantic models
-# ============================================================================
-
-class QueryStatus(str, Enum):
-    PENDING = "pending"
-    RUNNING = "running"
-    COMPLETED = "completed"
-    FAILED = "failed"
+# ═══════════════════════════════════════════════════════════════════════════════
+# PYDANTIC MODELS
+# ═══════════════════════════════════════════════════════════════════════════════
 
 
 class QueryRequest(BaseModel):
-    """Request body for POST /query."""
-    query: str = Field(..., min_length=5, description="Natural-language question for the agent")
+    query: str = Field(..., min_length=1, description="Natural-language geospatial question")
     session_id: Optional[str] = Field(None, description="Langfuse session ID (auto-generated if omitted)")
-    user_id: Optional[str] = Field(None, description="End-user identifier for tracing")
-    exports_dir: Optional[str] = Field(None, description="Custom exports directory (default: ./exports)")
-
-    model_config = {"json_schema_extra": {
-        "examples": [{
-            "query": "Could you show how cropping intensity has changed over the years in Navalgund, Dharwad, Karnataka?",
-            "session_id": None,
-            "user_id": "demo-user",
-        }]
-    }}
+    user_id: Optional[str] = Field(None, description="Optional user identifier for tracing")
 
 
-class QueryResponse(BaseModel):
-    """Status envelope returned by GET /query/{id} and POST /query."""
+class QueryBrief(BaseModel):
     query_id: str
-    status: QueryStatus
+    status: str
     query: str
-    session_id: Optional[str] = None
-    created_at: str
+    started_at: str
     completed_at: Optional[str] = None
-    duration_s: Optional[float] = None
-    result: Optional[str] = None
-    error: Optional[str] = None
-    exports: List[str] = Field(default_factory=list, description="Files created by this run")
+    duration_ms: Optional[float] = None
+    has_result: bool = False
+    has_error: bool = False
+    export_count: int = 0
 
 
-class FeedbackRequest(BaseModel):
-    """Request body for POST /feedback."""
-    query_id: Optional[str] = Field(None, description="Query ID to attach feedback to")
-    trace_id: Optional[str] = Field(None, description="Langfuse trace ID (alternative to query_id)")
-    score: float = Field(..., ge=0, le=1, description="Numeric score 0–1 (1 = thumbs up)")
-    comment: Optional[str] = Field(None, description="Optional free-text comment")
-
-
-class ExportFileInfo(BaseModel):
-    """Metadata for a single export file."""
+class ExportMeta(BaseModel):
     filename: str
-    extension: str
+    type: str
+    category: str
     size_bytes: int
-    size_human: str
-    mime_type: Optional[str]
-    created_at: str
+    modified: str
     url: str
-    preview_url: Optional[str] = None
 
 
-# ============================================================================
-# In-memory query store  (swap for Redis / DB in production)
-# ============================================================================
+# ═══════════════════════════════════════════════════════════════════════════════
+# FILE CATEGORY MAP
+# ═══════════════════════════════════════════════════════════════════════════════
 
-_query_store: Dict[str, Dict[str, Any]] = {}
-
-
-def _record_query(query_id: str, query: str, session_id: str) -> Dict[str, Any]:
-    entry = {
-        "query_id": query_id,
-        "status": QueryStatus.PENDING,
-        "query": query,
-        "session_id": session_id,
-        "created_at": datetime.utcnow().isoformat() + "Z",
-        "completed_at": None,
-        "duration_s": None,
-        "result": None,
-        "error": None,
-        "exports_before": set(_list_export_filenames()),
-    }
-    _query_store[query_id] = entry
-    return entry
-
-
-# ============================================================================
-# Background agent runner
-# ============================================================================
-
-def _run_agent_sync(query_id: str, query: str, session_id: str,
-                    user_id: Optional[str], exports_dir: Optional[str]) -> None:
-    """
-    Run the hybrid agent synchronously (called inside a thread).
-
-    Updates ``_query_store[query_id]`` with result / error / exports.
-    """
-    entry = _query_store[query_id]
-    entry["status"] = QueryStatus.RUNNING
-    t0 = time.perf_counter()
-
-    try:
-        main = _get_main()
-        result = main.run_hybrid_agent(
-            user_query=query,
-            exports_dir=exports_dir or str(EXPORTS_DIR),
-            session_id=session_id,
-            user_id=user_id,
-        )
-        elapsed = time.perf_counter() - t0
-
-        # Detect new files produced during this run
-        exports_after = set(_list_export_filenames())
-        new_files = sorted(exports_after - entry["exports_before"])
-
-        entry.update({
-            "status": QueryStatus.COMPLETED,
-            "result": str(result),
-            "completed_at": datetime.utcnow().isoformat() + "Z",
-            "duration_s": round(elapsed, 2),
-            "exports": new_files,
-        })
-
-    except Exception as exc:
-        elapsed = time.perf_counter() - t0
-        entry.update({
-            "status": QueryStatus.FAILED,
-            "error": str(exc),
-            "completed_at": datetime.utcnow().isoformat() + "Z",
-            "duration_s": round(elapsed, 2),
-        })
-
-
-# ============================================================================
-# Helper utilities
-# ============================================================================
-
-def _list_export_filenames() -> List[str]:
-    """Return sorted list of filenames in the exports directory."""
-    if not EXPORTS_DIR.exists():
-        return []
-    return sorted(f.name for f in EXPORTS_DIR.iterdir() if f.is_file())
-
-
-def _human_size(nbytes: int) -> str:
-    for unit in ("B", "KB", "MB", "GB"):
-        if nbytes < 1024:
-            return f"{nbytes:.1f} {unit}"
-        nbytes /= 1024
-    return f"{nbytes:.1f} TB"
-
-
-def _file_info(filepath: Path) -> ExportFileInfo:
-    stat = filepath.stat()
-    ext = filepath.suffix.lower()
-    mime, _ = mimetypes.guess_type(filepath.name)
-
-    # Custom MIME overrides
-    if ext == ".geojson":
-        mime = "application/geo+json"
-    elif ext == ".tif" or ext == ".tiff":
-        mime = "image/tiff"
-
-    has_preview = ext in (".geojson", ".png", ".txt")
-
-    return ExportFileInfo(
-        filename=filepath.name,
-        extension=ext,
-        size_bytes=stat.st_size,
-        size_human=_human_size(stat.st_size),
-        mime_type=mime,
-        created_at=datetime.fromtimestamp(stat.st_mtime).isoformat() + "Z",
-        url=f"/exports/{filepath.name}",
-        preview_url=f"/exports/{filepath.name}/preview" if has_preview else None,
-    )
-
-
-# ── Mapping: query number → known export files produced ──────────────────────
-# This maps each of the 17 prompts to the export files it generates so clients
-# can look up which outputs belong to which analysis type.
-
-QUERY_EXPORT_MAP: Dict[int, Dict[str, Any]] = {
-    1: {
-        "title": "Cropping Intensity Trend",
-        "description": "Cropping intensity change over years in a tehsil",
-        "exports": ["cropping_intensity_over_years.png", "navalgund_cropping_intensity_trend.png"],
-        "output_types": ["chart"],
-    },
-    2: {
-        "title": "Surface Water Availability Trend",
-        "description": "Surface water availability change over years",
-        "exports": ["navalgund_surface_water_availability_periods.png", "navalgund_surface_water_bodies.geojson"],
-        "output_types": ["chart", "geojson"],
-    },
-    3: {
-        "title": "Tree Cover Loss / Degradation",
-        "description": "Areas that lost tree cover since a given year, with degraded hectares",
-        "exports": ["deforestation_navalgund.geojson", "degradation_navalgund.geojson"],
-        "output_types": ["geojson"],
-    },
-    4: {
-        "title": "Cropland to Built-up Change",
-        "description": "Cropland converted to built-up areas with regions shown",
-        "exports": ["cropland_to_builtup_change.png", "crop_to_builtup_change.tif", "lulc_old_test.tif", "lulc_new_test.tif"],
-        "output_types": ["chart", "raster"],
-    },
-    5: {
-        "title": "Drought Affected Villages",
-        "description": "Villages that have experienced droughts",
-        "exports": ["drought_affected_villages_navalgund.geojson"],
-        "output_types": ["geojson"],
-    },
-    6: {
-        "title": "Drought-Sensitive Microwatersheds (Cropping)",
-        "description": "Microwatersheds with highest cropping sensitivity to drought",
-        "exports": ["top_drought_sensitive_microwatersheds.geojson"],
-        "output_types": ["geojson"],
-    },
-    7: {
-        "title": "Drought-Sensitive Microwatersheds (Surface Water)",
-        "description": "Microwatersheds with highest surface water sensitivity to drought",
-        "exports": ["top_sw_sensitive_microwatersheds.geojson"],
-        "output_types": ["geojson"],
-    },
-    8: {
-        "title": "Similar Microwatersheds (Feature Matching)",
-        "description": "MWS similar to a reference based on terrain, drought, LULC, CI",
-        "exports": ["similar_microwatersheds.geojson"],
-        "output_types": ["geojson"],
-    },
-    9: {
-        "title": "Similar Microwatersheds (PSM)",
-        "description": "MWS similar via propensity score matching",
-        "exports": ["psm_matched_microwatersheds.geojson"],
-        "output_types": ["geojson"],
-    },
-    10: {
-        "title": "Ranked MWS by CI & Surface Water",
-        "description": "Top-K drought/SW sensitive MWS ranked by cropping + water scores",
-        "exports": ["ranked_mws_by_ci_and_sw.geojson"],
-        "output_types": ["geojson"],
-    },
-    11: {
-        "title": "SC/ST% vs NREGA Works Scatter",
-        "description": "Village-level SC/ST population vs NREGA works scatter plot",
-        "exports": ["scst_vs_nrega_scatter.png", "scst_vs_nrega_villages.geojson"],
-        "output_types": ["chart", "geojson"],
-    },
-    12: {
-        "title": "Cropping Intensity vs Runoff Quadrants",
-        "description": "Four-quadrant scatter: high/low CI vs high/low runoff",
-        "exports": ["ci_vs_runoff_quadrant_scatter.png", "ci_vs_runoff_quadrants.geojson", "qt12_output.txt"],
-        "output_types": ["chart", "geojson", "text"],
-    },
-    13: {
-        "title": "Temperature vs Cropping Intensity Scatter",
-        "description": "Average monsoon LST vs cropping intensity scatter plot",
-        "exports": ["lst_vs_ci_scatter.png", "lst_vs_cropping_intensity.geojson"],
-        "output_types": ["chart", "geojson"],
-    },
-    14: {
-        "title": "Phenological Stages",
-        "description": "Regions with similar phenological cycles per month",
-        "exports": ["phenological_stages_heatmap.png", "phenological_stages_navalgund.geojson"],
-        "output_types": ["chart", "geojson"],
-    },
-    15: {
-        "title": "Runoff vs CI by Phenological Stage",
-        "description": "Runoff accumulation per phenostage vs cropping intensity",
-        "exports": ["runoff_vs_ci_by_phenostage.png", "runoff_vs_ci_by_phenostage.geojson"],
-        "output_types": ["chart", "geojson"],
-    },
-    16: {
-        "title": "LST–CI Hypothesis Test",
-        "description": "Hypothesis test: higher temp → higher cropping intensity",
-        "exports": ["lst_ci_hypothesis_test.png", "lst_ci_hypothesis_test.geojson"],
-        "output_types": ["chart", "geojson"],
-    },
-    17: {
-        "title": "Agricultural Suitability Index",
-        "description": "Composite ASI ranking of microwatersheds",
-        "exports": ["agricultural_suitability_index_ranking.png", "agricultural_suitability_index_ranked_mws.geojson"],
-        "output_types": ["chart", "geojson"],
-    },
+_EXT_CATEGORY: Dict[str, str] = {
+    ".png": "image", ".jpg": "image", ".jpeg": "image", ".svg": "image",
+    ".tif": "raster", ".tiff": "raster",
+    ".geojson": "vector", ".shp": "vector", ".gpkg": "vector", ".kml": "vector",
+    ".csv": "data", ".xlsx": "data", ".json": "data", ".txt": "data",
 }
 
+_EXT_CONTENT_TYPE: Dict[str, str] = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".svg": "image/svg+xml",
+    ".tif": "image/tiff",
+    ".tiff": "image/tiff",
+    ".geojson": "application/geo+json",
+    ".json": "application/json",
+    ".csv": "text/csv",
+    ".txt": "text/plain",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".gpkg": "application/geopackage+sqlite3",
+    ".kml": "application/vnd.google-earth.kml+xml",
+}
 
-# ============================================================================
-# ROUTES — Health & Config
-# ============================================================================
-
-@app.get("/health", tags=["System"])
-async def health_check():
-    """Health check — reports service status, Langfuse connectivity, and EE init."""
-    langfuse_ok = False
-    try:
-        from langfuse_observability import is_enabled
-        langfuse_ok = is_enabled()
-    except Exception:
-        pass
-
-    ee_ok = False
-    try:
-        import ee as _ee
-        _ee.Number(1).getInfo()
-        ee_ok = True
-    except Exception:
-        pass
-
-    return {
-        "status": "ok",
-        "timestamp": datetime.utcnow().isoformat() + "Z",
-        "langfuse_connected": langfuse_ok,
-        "earth_engine_connected": ee_ok,
-        "exports_dir": str(EXPORTS_DIR),
-        "exports_count": len(_list_export_filenames()),
-    }
+# ═══════════════════════════════════════════════════════════════════════════════
+# EXPORT HELPERS
+# ═══════════════════════════════════════════════════════════════════════════════
 
 
-@app.get("/config", tags=["System"])
-async def get_config():
-    """Return non-secret configuration details."""
-    return {
-        "model_id": "gemini/gemini-2.5-flash-lite",
-        "corestack_base_url": os.getenv("CORESTACK_BASE_URL", "https://geoserver.core-stack.org/api/v1"),
-        "exports_dir": str(EXPORTS_DIR),
-        "langfuse_host": os.getenv("LANGFUSE_HOST", os.getenv("LANGFUSE_BASE_URL", "")),
-        "agent_workers": int(os.getenv("AGENT_WORKERS", "2")),
-        "query_export_map": QUERY_EXPORT_MAP,
-    }
+def _scan_exports(category: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Return metadata for every file in exports/."""
+    files: List[Dict[str, Any]] = []
+    if not os.path.isdir(EXPORTS_DIR):
+        return files
+    for fname in os.listdir(EXPORTS_DIR):
+        fpath = os.path.join(EXPORTS_DIR, fname)
+        if not os.path.isfile(fpath):
+            continue
+        ext = os.path.splitext(fname)[1].lower()
+        cat = _EXT_CATEGORY.get(ext, "other")
+        if category and cat != category:
+            continue
+        st = os.stat(fpath)
+        files.append({
+            "filename": fname,
+            "type": ext.lstrip(".") or "unknown",
+            "category": cat,
+            "size_bytes": st.st_size,
+            "modified": datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat(),
+            "url": f"/api/exports/{fname}",
+        })
+    files.sort(key=lambda f: f["modified"], reverse=True)
+    return files
 
 
-# ============================================================================
-# ROUTES — Query (submit + poll)
-# ============================================================================
+def _snapshot_exports() -> Dict[str, float]:
+    """filename → mtime snapshot of exports/."""
+    snap: Dict[str, float] = {}
+    if os.path.isdir(EXPORTS_DIR):
+        for fname in os.listdir(EXPORTS_DIR):
+            fpath = os.path.join(EXPORTS_DIR, fname)
+            if os.path.isfile(fpath):
+                snap[fname] = os.path.getmtime(fpath)
+    return snap
 
-@app.post("/query", response_model=QueryResponse, status_code=202, tags=["Agent"])
-async def submit_query(req: QueryRequest):
+
+def _diff_exports(before: Dict[str, float], after: Dict[str, float]) -> List[Dict[str, Any]]:
+    """Return metadata dicts for files that are new or modified."""
+    changed: List[Dict[str, Any]] = []
+    for fname, mtime in after.items():
+        if fname not in before or before[fname] != mtime:
+            fpath = os.path.join(EXPORTS_DIR, fname)
+            if os.path.isfile(fpath):
+                ext = os.path.splitext(fname)[1].lower()
+                changed.append({
+                    "filename": fname,
+                    "type": ext.lstrip(".") or "unknown",
+                    "category": _EXT_CATEGORY.get(ext, "other"),
+                    "size_bytes": os.path.getsize(fpath),
+                    "url": f"/api/exports/{fname}",
+                })
+    return changed
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STDOUT LOG INTERCEPTOR  (filters out the mega-prompt, keeps code + results)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Phrases that only appear inside the injected prompt template — any line
+# containing one of these is suppressed from the streamed logs.
+_PROMPT_FINGERPRINTS: List[str] = [
+    "You are a geospatial analysis agent",
+    "CRITICAL UNDERSTANDING: SPATIAL vs TIMESERIES",
+    "LAYER SELECTION DECISION FRAMEWORK",
+    "SANDBOX CONSTRAINTS",
+    "═══════════════════",
+    "EXAMPLE 1:", "EXAMPLE 1b:", "EXAMPLE 2:", "EXAMPLE 3:",
+    "EXAMPLE 4:", "EXAMPLE 5:", "EXAMPLE 6:", "EXAMPLE 7:",
+    "EXAMPLE 8:", "EXAMPLE 9:", "EXAMPLE 10:", "EXAMPLE 11:",
+    "EXAMPLE 12:", "EXAMPLE 13:", "EXAMPLE 14:", "EXAMPLE 15:",
+    "MANDATORY:", "WHY SPATIAL?", "WHY NOT TIMESERIES?",
+    "WHY CHANGE RASTER?", "CORRECT CHOICE:", "WRONG CHOICE:",
+    "OUTPUTS (MANDATORY",
+    "Query Type 1:", "Query Type 2:", "Query Type 3:",
+    "Query Type 4:", "Query Type 5:", "Query Type 6:",
+    "Query Type 7:", "Query Type 8:", "Query Type 9:",
+    "Query Type 10:", "Query Type 11:", "Query Type 12:",
+    "Query Type 13:", "Query Type 14:", "Query Type 15:",
+    "Query Type 16:", "Query Type 17:",
+    "CRITICAL LAYER NAME MATCHING",
+    "SURFACE WATER DATA COLUMN REFERENCE",
+    "ACTUAL CHANGE DETECTION LAYER NAMES",
+    "osmnx, geopandas, shapely, matplotlib",
+    "═══════════════════════════════════════",
+    "YEAR COLUMNS:",
+    "fetch_corestack_data tool FIRST",
+    "Make sure to wrap your final answer",
+    "final_answer(\"The final answer",
+    "WHY CHANGE RASTER",
+    "WHY NOT TIMESERIES",
+    "NEVER use bare `open()`",
+    "NEVER reproject to UTM",
+]
+
+# If a single write() call is longer than this and matches no "interesting"
+# pattern it is almost certainly the prompt being echoed → suppress.
+_MAX_BORING_LEN = 800
+
+
+def _is_prompt_content(text: str) -> bool:
+    """Return True when *text* looks like part of the injected prompt."""
+    for fp in _PROMPT_FINGERPRINTS:
+        if fp in text:
+            return True
+    return False
+
+
+class _LogInterceptor:
     """
-    Submit a natural-language query to the hybrid agent.
+    Replaces ``sys.stdout`` while the agent runs.
 
-    The agent runs asynchronously in a background thread. Poll
-    ``GET /query/{query_id}`` for the result, or use the WebSocket
-    endpoint ``/ws/query`` for real-time streaming.
-
-    Returns 202 Accepted with a ``query_id`` for tracking.
+    * Forwards everything to the **real** console (``_real``) so the dev
+      terminal still works.
+    * Filters out prompt content and pushes clean lines into a
+      per-query log list for the API to stream.
     """
-    main = _get_main()
 
-    query_id = uuid.uuid4().hex[:12]
-    session_id = req.session_id or main.generate_session_id()
+    def __init__(self, query_id: str, log_sink: List[str], real_stdout, user_query: str = ""):
+        self._qid = query_id
+        self._sink = log_sink
+        self._real = real_stdout
+        self._buf = ""  # partial-line buffer
+        self._user_query = user_query.strip().lower()
 
-    entry = _record_query(query_id, req.query, session_id)
+    # ── io.TextIOBase protocol ──────────────────────────────────────────────
 
-    # Launch agent in background thread (non-blocking)
-    loop = asyncio.get_running_loop()
-    loop.run_in_executor(
-        _executor,
-        _run_agent_sync,
-        query_id,
-        req.query,
-        session_id,
-        req.user_id,
-        req.exports_dir,
-    )
+    def write(self, data: str) -> int:
+        # Always forward to real stdout
+        if self._real:
+            try:
+                self._real.write(data)
+            except Exception:
+                pass
 
-    return QueryResponse(
-        query_id=query_id,
-        status=QueryStatus.PENDING,
-        query=req.query,
-        session_id=session_id,
-        created_at=entry["created_at"],
-    )
+        self._buf += data
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            self._process_line(line)
+        return len(data)
 
+    def flush(self):
+        if self._real:
+            try:
+                self._real.flush()
+            except Exception:
+                pass
 
-@app.get("/query/{query_id}", response_model=QueryResponse, tags=["Agent"])
-async def get_query_status(query_id: str):
-    """
-    Poll the status and result of a previously submitted query.
+    def fileno(self):
+        if self._real:
+            return self._real.fileno()
+        raise io.UnsupportedOperation("fileno")
 
-    Returns ``pending`` | ``running`` | ``completed`` | ``failed``.
-    When ``completed``, the ``result`` field contains the agent's answer
-    and ``exports`` lists newly created files.
-    """
-    entry = _query_store.get(query_id)
-    if not entry:
-        raise HTTPException(404, f"Query {query_id} not found")
+    @property
+    def encoding(self):
+        return getattr(self._real, "encoding", "utf-8")
 
-    return QueryResponse(
-        query_id=entry["query_id"],
-        status=entry["status"],
-        query=entry["query"],
-        session_id=entry.get("session_id"),
-        created_at=entry["created_at"],
-        completed_at=entry.get("completed_at"),
-        duration_s=entry.get("duration_s"),
-        result=entry.get("result"),
-        error=entry.get("error"),
-        exports=entry.get("exports", []),
-    )
+    def isatty(self):
+        return False
 
+    # ── internal ────────────────────────────────────────────────────────────
 
-@app.get("/queries", tags=["Agent"])
-async def list_queries(
-    status: Optional[QueryStatus] = Query(None, description="Filter by status"),
-    limit: int = Query(50, ge=1, le=500),
-):
-    """List recent queries, optionally filtered by status."""
-    items = list(_query_store.values())
-    if status:
-        items = [i for i in items if i["status"] == status]
-    items = sorted(items, key=lambda x: x["created_at"], reverse=True)[:limit]
-    return {"total": len(items), "queries": items}
-
-
-# ============================================================================
-# ROUTES — WebSocket (real-time streaming)
-# ============================================================================
-
-@app.websocket("/ws/query")
-async def websocket_query(ws: WebSocket):
-    """
-    WebSocket endpoint for real-time agent output streaming.
-
-    Protocol:
-    1. Client connects.
-    2. Client sends JSON: ``{"query": "...", "session_id": "...", "user_id": "..."}``
-    3. Server streams back JSON messages:
-       - ``{"type": "status", "status": "running"}``
-       - ``{"type": "log", "data": "..."}``          (stdout lines)
-       - ``{"type": "result", "data": "...", "exports": [...]}``
-       - ``{"type": "error", "error": "..."}``
-    4. Connection closes after result / error.
-    """
-    await ws.accept()
-
-    try:
-        # 1. Receive the query
-        raw = await ws.receive_text()
-        payload = json.loads(raw)
-        user_query = payload.get("query", "")
-        session_id = payload.get("session_id")
-        user_id = payload.get("user_id")
-
-        if not user_query or len(user_query) < 5:
-            await ws.send_json({"type": "error", "error": "Query must be at least 5 characters"})
-            await ws.close()
+    def _process_line(self, line: str):
+        stripped = line.strip()
+        if not stripped:
             return
 
-        main = _get_main()
-        if not session_id:
-            session_id = main.generate_session_id()
+        # Drop prompt content
+        if _is_prompt_content(stripped):
+            return
 
-        query_id = uuid.uuid4().hex[:12]
-        _record_query(query_id, user_query, session_id)
+        # Drop the user's own query text from logs
+        if self._user_query:
+            lower = stripped.lower()
+            if lower == self._user_query:
+                return
+            # Also catch "New task: <query>" or similar wrapper lines
+            if lower.endswith(self._user_query) and len(stripped) < len(self._user_query) + 40:
+                return
 
-        await ws.send_json({"type": "status", "status": "running", "query_id": query_id, "session_id": session_id})
+        # Drop very long lines that are almost certainly prompt echo
+        if len(stripped) > _MAX_BORING_LEN:
+            # keep JSON blobs (API responses) and tracebacks
+            if not (stripped.startswith("{") or stripped.startswith("Traceback")):
+                return
 
-        # 2. Run agent in thread, capture stdout lines
-        import io, sys
-        from contextlib import redirect_stdout
+        self._sink.append(stripped)
 
-        class _WSBuffer:
-            """Captures stdout and asynchronously pushes lines to the WebSocket."""
-            def __init__(self, ws_ref: WebSocket, loop_ref):
-                self._ws = ws_ref
-                self._loop = loop_ref
-                self._original = sys.stdout
-                self._buffer = ""
 
-            def write(self, data: str) -> int:
-                self._original.write(data)  # keep console output
-                self._buffer += data
-                while "\n" in self._buffer:
-                    line, self._buffer = self._buffer.split("\n", 1)
-                    if line.strip():
-                        asyncio.run_coroutine_threadsafe(
-                            self._send_line(line), self._loop
-                        )
-                return len(data)
+# ═══════════════════════════════════════════════════════════════════════════════
+# QUERY MANAGER
+# ═══════════════════════════════════════════════════════════════════════════════
 
-            def flush(self):
-                self._original.flush()
+_AGENT_LOCK = threading.Lock()  # serialise agent runs (shared stdout)
 
-            async def _send_line(self, line: str):
-                try:
-                    await self._ws.send_json({"type": "log", "data": line})
-                except Exception:
-                    pass
 
-        loop = asyncio.get_running_loop()
+class _QueryStore:
+    """Thread-safe in-memory store for the last N query records."""
 
-        def _ws_agent_runner():
-            ws_buf = _WSBuffer(ws, loop)
-            old_stdout = sys.stdout
-            sys.stdout = ws_buf
-            try:
-                result = main.run_hybrid_agent(
-                    user_query=user_query,
-                    exports_dir=str(EXPORTS_DIR),
-                    session_id=session_id,
-                    user_id=user_id,
-                )
-                return result
-            finally:
-                sys.stdout = old_stdout
+    _MAX = 200
 
-        # 3. Execute
-        t0 = time.perf_counter()
+    def __init__(self):
+        self._data: OrderedDict[str, Dict[str, Any]] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def create(self, query: str, session_id: str | None, user_id: str | None) -> str:
+        qid = uuid.uuid4().hex[:10]
+        rec = {
+            "query_id": qid,
+            "status": "pending",
+            "query": query,
+            "session_id": session_id or generate_session_id(),
+            "user_id": user_id,
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "completed_at": None,
+            "duration_ms": None,
+            "result": None,
+            "error": None,
+            "code_blocks": [],
+            "new_exports": [],
+            "logs": [],           # filtered log lines (list[str])
+        }
+        with self._lock:
+            self._data[qid] = rec
+            while len(self._data) > self._MAX:
+                self._data.popitem(last=False)
+        return qid
+
+    def get(self, qid: str) -> Dict[str, Any] | None:
+        return self._data.get(qid)
+
+    def update(self, qid: str, **kw):
+        with self._lock:
+            if qid in self._data:
+                self._data[qid].update(kw)
+
+    def all(self) -> List[Dict[str, Any]]:
+        return list(self._data.values())
+
+
+store = _QueryStore()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# BACKGROUND AGENT RUNNER
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _extract_code_blocks(text: str) -> List[str]:
+    if not text:
+        return []
+    blocks = re.findall(r"```(?:python|py)?\n(.*?)```", str(text), flags=re.DOTALL)
+    return [b.strip() for b in blocks if b.strip()]
+
+
+def _run_agent(qid: str):
+    """Execute the agent synchronously (called from a daemon thread)."""
+    rec = store.get(qid)
+    if rec is None:
+        return
+
+    store.update(qid, status="running")
+    logger.info("Agent started  [%s]  %s", qid, rec["query"][:80])
+
+    # Snapshot exports BEFORE
+    snap_before = _snapshot_exports()
+
+    t0 = time.perf_counter()
+    original_stdout = sys.stdout
+
+    with _AGENT_LOCK:
+        # Install interceptor
+        interceptor = _LogInterceptor(qid, rec["logs"], original_stdout, user_query=rec["query"])
+        sys.stdout = interceptor  # type: ignore[assignment]
+
         try:
-            result = await loop.run_in_executor(_executor, _ws_agent_runner)
-            elapsed = round(time.perf_counter() - t0, 2)
+            result = run_hybrid_agent(
+                user_query=rec["query"],
+                exports_dir=EXPORTS_DIR,
+                session_id=rec["session_id"],
+                user_id=rec["user_id"],
+            )
 
-            exports_after = set(_list_export_filenames())
-            exports_before = _query_store[query_id].get("exports_before", set())
-            new_files = sorted(exports_after - exports_before)
+            elapsed = (time.perf_counter() - t0) * 1000
+            snap_after = _snapshot_exports()
 
-            _query_store[query_id].update({
-                "status": QueryStatus.COMPLETED,
-                "result": str(result),
-                "completed_at": datetime.utcnow().isoformat() + "Z",
-                "duration_s": elapsed,
-                "exports": new_files,
-            })
-
-            await ws.send_json({
-                "type": "result",
-                "query_id": query_id,
-                "data": str(result),
-                "exports": new_files,
-                "duration_s": elapsed,
-            })
+            store.update(
+                qid,
+                status="completed",
+                result=str(result),
+                completed_at=datetime.now(timezone.utc).isoformat(),
+                duration_ms=round(elapsed, 2),
+                new_exports=_diff_exports(snap_before, snap_after),
+                code_blocks=_extract_code_blocks(str(result)),
+            )
+            logger.info("Agent finished [%s]  %.1fs", qid, elapsed / 1000)
 
         except Exception as exc:
-            elapsed = round(time.perf_counter() - t0, 2)
-            _query_store[query_id].update({
-                "status": QueryStatus.FAILED,
-                "error": str(exc),
-                "completed_at": datetime.utcnow().isoformat() + "Z",
-                "duration_s": elapsed,
-            })
-            await ws.send_json({"type": "error", "error": str(exc), "duration_s": elapsed})
+            elapsed = (time.perf_counter() - t0) * 1000
+            store.update(
+                qid,
+                status="failed",
+                error=str(exc),
+                completed_at=datetime.now(timezone.utc).isoformat(),
+                duration_ms=round(elapsed, 2),
+            )
+            logger.error("Agent failed   [%s]  %s", qid, exc)
 
-    except WebSocketDisconnect:
-        pass
-    except Exception as exc:
-        try:
-            await ws.send_json({"type": "error", "error": str(exc)})
-        except Exception:
-            pass
-    finally:
-        try:
-            await ws.close()
-        except Exception:
-            pass
+        finally:
+            sys.stdout = original_stdout
+            try:
+                lf_flush()
+            except Exception:
+                pass
 
 
-# ============================================================================
-# ROUTES — Exports (list / download / preview / delete)
-# ============================================================================
+# ═══════════════════════════════════════════════════════════════════════════════
+# REST ENDPOINTS
+# ═══════════════════════════════════════════════════════════════════════════════
 
-@app.get("/exports", tags=["Exports"])
-async def list_exports(
-    extension: Optional[str] = Query(None, description="Filter by extension (.geojson, .png, .tif, .txt)"),
-    query_number: Optional[int] = Query(None, ge=1, le=17, description="Filter by query # (1–17)"),
-):
+# ── health ──────────────────────────────────────────────────────────────────
+
+@app.get("/api/health", tags=["system"])
+async def health():
+    return {
+        "status": "ok",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "exports_dir": EXPORTS_DIR,
+        "export_count": len(_scan_exports()),
+    }
+
+
+# ── submit query ────────────────────────────────────────────────────────────
+
+@app.post("/api/query", tags=["query"])
+async def submit_query(body: QueryRequest):
     """
-    List all exported files with metadata.
-
-    Optionally filter by file extension or query number (1–17) to see
-    which exports belong to which analysis.
+    Submit a geospatial query.  Returns immediately with a ``query_id``.
+    Connect to ``/api/query/{id}/stream`` for real-time SSE updates.
     """
-    files: List[ExportFileInfo] = []
-    for f in sorted(EXPORTS_DIR.iterdir()):
-        if not f.is_file():
-            continue
-        if extension and not f.suffix.lower() == extension.lower():
-            continue
-        files.append(_file_info(f))
+    qid = store.create(body.query, body.session_id, body.user_id)
+    logger.info("Query created   [%s]  %s", qid, body.query[:80])
 
-    # Filter by query number if provided
-    if query_number and query_number in QUERY_EXPORT_MAP:
-        allowed = set(QUERY_EXPORT_MAP[query_number]["exports"])
-        files = [f for f in files if f.filename in allowed]
-
-    # Summary statistics
-    total_size = sum(f.size_bytes for f in files)
-    ext_counts: Dict[str, int] = {}
-    for f in files:
-        ext_counts[f.extension] = ext_counts.get(f.extension, 0) + 1
+    thread = threading.Thread(target=_run_agent, args=(qid,), daemon=True)
+    thread.start()
 
     return {
-        "total_files": len(files),
-        "total_size": _human_size(total_size),
-        "by_extension": ext_counts,
-        "files": files,
+        "query_id": qid,
+        "status": "pending",
+        "stream_url": f"/api/query/{qid}/stream",
     }
 
 
-@app.get("/exports/{filename}", tags=["Exports"])
-async def download_export(filename: str):
-    """
-    Download an export file.
+# ── poll result ─────────────────────────────────────────────────────────────
 
-    Returns the file with appropriate Content-Type:
-    - ``.geojson`` → ``application/geo+json``
-    - ``.png``     → ``image/png``
-    - ``.tif``     → ``image/tiff``
-    - ``.txt``     → ``text/plain``
-    """
-    filepath = EXPORTS_DIR / filename
-    if not filepath.exists() or not filepath.is_file():
-        raise HTTPException(404, f"Export file '{filename}' not found")
+@app.get("/api/query/{qid}", tags=["query"])
+async def get_query(qid: str):
+    """Poll the full result of a query (use SSE stream for real-time)."""
+    rec = store.get(qid)
+    if rec is None:
+        raise HTTPException(404, f"Query {qid} not found")
 
-    # Security: prevent path traversal
-    if not filepath.resolve().is_relative_to(EXPORTS_DIR.resolve()):
-        raise HTTPException(403, "Access denied")
-
-    ext = filepath.suffix.lower()
-    media_types = {
-        ".geojson": "application/geo+json",
-        ".png": "image/png",
-        ".tif": "image/tiff",
-        ".tiff": "image/tiff",
-        ".txt": "text/plain",
+    return {
+        "query_id": rec["query_id"],
+        "status": rec["status"],
+        "query": rec["query"],
+        "started_at": rec["started_at"],
+        "completed_at": rec["completed_at"],
+        "duration_ms": rec["duration_ms"],
+        "result": rec["result"],
+        "error": rec["error"],
+        "code_blocks": rec["code_blocks"],
+        "new_exports": rec["new_exports"],
     }
-    media_type = media_types.get(ext, "application/octet-stream")
 
-    return FileResponse(
-        path=str(filepath),
-        filename=filename,
-        media_type=media_type,
+
+# ── execution logs (filtered) ──────────────────────────────────────────────
+
+@app.get("/api/query/{qid}/logs", tags=["query"])
+async def get_query_logs(qid: str, since: int = 0):
+    """
+    Return filtered execution logs.  Pass ``since=<n>`` to fetch only new
+    lines (long-polling friendly).
+    """
+    rec = store.get(qid)
+    if rec is None:
+        raise HTTPException(404, f"Query {qid} not found")
+
+    logs: list = rec["logs"]
+    return {
+        "query_id": qid,
+        "status": rec["status"],
+        "total": len(logs),
+        "logs": logs[since:],
+        "next_since": len(logs),
+    }
+
+
+# ── SSE stream ─────────────────────────────────────────────────────────────
+
+@app.get("/api/query/{qid}/stream", tags=["query"])
+async def stream_query(qid: str):
+    """
+    Server-Sent Events stream.  Events:
+
+    * ``log``        — a single filtered execution log line
+    * ``status``     — running / completed / failed
+    * ``result``     — final agent answer (text)
+    * ``exports``    — list of new/modified export files
+    * ``code``       — code blocks extracted from the answer
+    * ``duration_ms``— wall-clock execution time
+    * ``done``       — terminal event; close the connection
+    """
+    rec = store.get(qid)
+    if rec is None:
+        raise HTTPException(404, f"Query {qid} not found")
+
+    def _sse(event_type: str, data: Any) -> str:
+        payload = json.dumps({"type": event_type, "data": data}, default=str)
+        return f"data: {payload}\n\n"
+
+    async def _generator():
+        cursor = 0
+
+        # initial status
+        yield _sse("status", store.get(qid)["status"])
+
+        while True:
+            snap = store.get(qid)
+            if snap is None:
+                break
+
+            # stream new log lines
+            logs: list = snap["logs"]
+            if len(logs) > cursor:
+                for line in logs[cursor:]:
+                    yield _sse("log", line)
+                cursor = len(logs)
+
+            # terminal states
+            if snap["status"] in ("completed", "failed"):
+                yield _sse("status", snap["status"])
+
+                if snap["status"] == "completed":
+                    yield _sse("result", snap["result"])
+                    yield _sse("exports", snap["new_exports"])
+                    yield _sse("code", snap["code_blocks"])
+                    yield _sse("duration_ms", snap["duration_ms"])
+                else:
+                    yield _sse("error", snap["error"])
+                    yield _sse("duration_ms", snap["duration_ms"])
+
+                yield _sse("done", None)
+                break
+
+            await asyncio.sleep(0.4)
+
+    return StreamingResponse(
+        _generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 
-@app.get("/exports/{filename}/preview", tags=["Exports"])
-async def preview_export(
-    filename: str,
-    max_features: int = Query(100, ge=1, le=10000, description="Max GeoJSON features to return"),
-):
-    """
-    Preview an export file without downloading the full thing.
+# ── list queries ────────────────────────────────────────────────────────────
 
-    - **GeoJSON**: Returns parsed JSON (truncated to ``max_features``).
-    - **PNG**: Returns base64-encoded image data.
-    - **TXT**: Returns the first 5000 characters.
-    - **TIFF**: Returns file metadata (size, name) — no inline preview.
-    """
-    filepath = EXPORTS_DIR / filename
-    if not filepath.exists() or not filepath.is_file():
-        raise HTTPException(404, f"Export file '{filename}' not found")
+@app.get("/api/queries", tags=["query"])
+async def list_queries(status: Optional[str] = None, limit: int = 50):
+    """List recent queries.  Optional filter by *status*."""
+    items = store.all()
+    if status:
+        items = [q for q in items if q["status"] == status]
 
-    if not filepath.resolve().is_relative_to(EXPORTS_DIR.resolve()):
-        raise HTTPException(403, "Access denied")
-
-    ext = filepath.suffix.lower()
-
-    if ext == ".geojson":
-        with open(filepath, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        # Truncate features for preview
-        if isinstance(data, dict) and "features" in data:
-            total = len(data["features"])
-            data["features"] = data["features"][:max_features]
-            data["_preview"] = {
-                "total_features": total,
-                "shown_features": min(total, max_features),
-                "truncated": total > max_features,
-            }
-        return JSONResponse(data)
-
-    elif ext == ".png":
-        with open(filepath, "rb") as f:
-            img_bytes = f.read()
-        b64 = base64.b64encode(img_bytes).decode("ascii")
-        return {
-            "filename": filename,
-            "mime_type": "image/png",
-            "size_bytes": len(img_bytes),
-            "base64": f"data:image/png;base64,{b64}",
-        }
-
-    elif ext == ".txt":
-        with open(filepath, "r", encoding="utf-8", errors="replace") as f:
-            text = f.read(5000)
-        return {
-            "filename": filename,
-            "mime_type": "text/plain",
-            "preview": text,
-            "truncated": filepath.stat().st_size > 5000,
-        }
-
-    elif ext in (".tif", ".tiff"):
-        stat = filepath.stat()
-        return {
-            "filename": filename,
-            "mime_type": "image/tiff",
-            "size_bytes": stat.st_size,
-            "size_human": _human_size(stat.st_size),
-            "note": "TIFF preview not available inline — use /exports/{filename} to download",
-        }
-
-    else:
-        raise HTTPException(400, f"Preview not supported for extension '{ext}'")
-
-
-@app.delete("/exports/{filename}", tags=["Exports"])
-async def delete_export(filename: str):
-    """Delete an export file."""
-    filepath = EXPORTS_DIR / filename
-    if not filepath.exists() or not filepath.is_file():
-        raise HTTPException(404, f"Export file '{filename}' not found")
-    if not filepath.resolve().is_relative_to(EXPORTS_DIR.resolve()):
-        raise HTTPException(403, "Access denied")
-    filepath.unlink()
-    return {"deleted": filename}
-
-
-# ============================================================================
-# ROUTES — Query-to-Export Mapping
-# ============================================================================
-
-@app.get("/analyses", tags=["Analyses"])
-async def list_analyses():
-    """
-    List all 17 analysis types with their expected exports.
-
-    Useful for a frontend to show available analyses and check which
-    outputs already exist on disk.
-    """
-    results = []
-    for qnum, info in QUERY_EXPORT_MAP.items():
-        existing = [f for f in info["exports"] if (EXPORTS_DIR / f).exists()]
-        results.append({
-            "query_number": qnum,
-            "title": info["title"],
-            "description": info["description"],
-            "output_types": info["output_types"],
-            "expected_exports": info["exports"],
-            "existing_exports": existing,
-            "complete": len(existing) == len(info["exports"]),
+    out = []
+    for q in items[-limit:]:
+        out.append({
+            "query_id": q["query_id"],
+            "status": q["status"],
+            "query": q["query"],
+            "started_at": q["started_at"],
+            "completed_at": q["completed_at"],
+            "duration_ms": q["duration_ms"],
+            "has_result": q["result"] is not None,
+            "has_error": q["error"] is not None,
+            "export_count": len(q.get("new_exports", [])),
         })
-    return {"analyses": results}
+
+    return {"queries": out, "total": len(out)}
 
 
-@app.get("/analyses/{query_number}", tags=["Analyses"])
-async def get_analysis(query_number: int):
+# ═══════════════════════════════════════════════════════════════════════════════
+# EXPORT ENDPOINTS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/exports", tags=["exports"])
+async def list_exports(category: Optional[str] = None):
     """
-    Get details and existing exports for a specific analysis (1–17).
+    List all files in ``exports/``.
+
+    Optional filter: ``?category=image|vector|raster|data``
     """
-    if query_number not in QUERY_EXPORT_MAP:
-        raise HTTPException(404, f"Analysis #{query_number} not found (valid: 1–17)")
-
-    info = QUERY_EXPORT_MAP[query_number]
-    export_details = []
-    for fname in info["exports"]:
-        fpath = EXPORTS_DIR / fname
-        if fpath.exists():
-            export_details.append(_file_info(fpath))
-        else:
-            export_details.append({"filename": fname, "exists": False})
-
-    return {
-        "query_number": query_number,
-        **info,
-        "export_details": export_details,
-    }
+    files = _scan_exports(category)
+    return {"exports": files, "total": len(files)}
 
 
-# ============================================================================
-# ROUTES — Sessions & Feedback (Langfuse integration)
-# ============================================================================
+@app.get("/api/exports/{filename}", tags=["exports"])
+async def serve_export(filename: str):
+    """Download / serve an export file with the correct Content-Type."""
+    fpath = os.path.join(EXPORTS_DIR, filename)
+    if not os.path.isfile(fpath):
+        raise HTTPException(404, f"Export not found: {filename}")
 
-@app.get("/sessions", tags=["Observability"])
-async def list_sessions(limit: int = Query(20, ge=1, le=100)):
+    ext = os.path.splitext(filename)[1].lower()
+    media = _EXT_CONTENT_TYPE.get(ext, "application/octet-stream")
+    return FileResponse(fpath, media_type=media, filename=filename)
+
+
+@app.get("/api/exports/{filename}/preview", tags=["exports"])
+async def preview_export(filename: str):
     """
-    List recent Langfuse session IDs from the in-memory query store.
+    Inline preview suitable for a dashboard.
 
-    For full session data, use the Langfuse dashboard directly.
+    * **GeoJSON / JSON** → parsed object
+    * **PNG / JPG / TIF** → base64 data-URI
+    * **CSV / TXT** → plain text (first 200 KB)
     """
-    session_ids = sorted(
-        set(e.get("session_id") for e in _query_store.values() if e.get("session_id")),
-        reverse=True,
-    )[:limit]
-    return {"sessions": session_ids}
+    fpath = os.path.join(EXPORTS_DIR, filename)
+    if not os.path.isfile(fpath):
+        raise HTTPException(404, f"Export not found: {filename}")
 
+    ext = os.path.splitext(filename)[1].lower()
+    size = os.path.getsize(fpath)
 
-@app.get("/sessions/{session_id}", tags=["Observability"])
-async def get_session(session_id: str):
-    """
-    Get all queries associated with a Langfuse session ID.
-    """
-    queries = [
-        e for e in _query_store.values()
-        if e.get("session_id") == session_id
-    ]
-    if not queries:
-        raise HTTPException(404, f"Session '{session_id}' not found")
-
-    queries = sorted(queries, key=lambda x: x["created_at"])
-    return {
-        "session_id": session_id,
-        "total_queries": len(queries),
-        "queries": queries,
-    }
-
-
-@app.post("/feedback", tags=["Observability"])
-async def submit_feedback(req: FeedbackRequest):
-    """
-    Submit user feedback (thumbs up/down) for a completed query.
-
-    This records a score on the Langfuse trace so you can track
-    answer quality over time.
-
-    - ``score``: 0.0 (bad) → 1.0 (good)
-    - ``comment``: optional free-text
-    """
-    # Validate that query exists
-    if req.query_id:
-        entry = _query_store.get(req.query_id)
-        if not entry:
-            raise HTTPException(404, f"Query {req.query_id} not found")
-
-    # Record in Langfuse
-    try:
-        from langfuse_observability import score_trace_by_id, lf_client
-
-        trace_id = req.trace_id
-        if not trace_id and req.query_id:
-            # The trace_id is the same used during the agent run.
-            # For a more robust approach, store the trace_id in _query_store
-            # when the agent runs. For now, use the score_trace_by_id approach.
-            pass
-
-        if trace_id:
-            score_trace_by_id(
-                trace_id=trace_id,
-                name="user_feedback",
-                value=req.score,
-                data_type="NUMERIC",
-                comment=req.comment,
-            )
-    except Exception as exc:
-        # Don't fail the request if Langfuse is down
-        print(f"⚠️  Langfuse feedback recording failed: {exc}")
-
-    return {
-        "status": "recorded",
-        "query_id": req.query_id,
-        "score": req.score,
-        "comment": req.comment,
-    }
-
-
-# ============================================================================
-# ROUTES — GeoJSON-specific utilities
-# ============================================================================
-
-@app.get("/geojson", tags=["GeoJSON"])
-async def list_geojson_files():
-    """List all GeoJSON exports with feature counts."""
-    results = []
-    for f in sorted(EXPORTS_DIR.glob("*.geojson")):
+    # ── vector / json ───────────────────────────────────────────────────────
+    if ext in (".geojson", ".json"):
         try:
-            with open(f, "r", encoding="utf-8") as fh:
-                data = json.load(fh)
-            n_features = len(data.get("features", []))
-        except Exception:
-            n_features = -1
+            with open(fpath, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return {
+                "type": "geojson" if ext == ".geojson" else "json",
+                "filename": filename,
+                "size_bytes": size,
+                "data": data,
+            }
+        except json.JSONDecodeError:
+            with open(fpath, "r", encoding="utf-8") as f:
+                return {"type": "text", "filename": filename, "data": f.read(200_000)}
 
-        info = _file_info(f)
-        results.append({
-            **info.model_dump(),
-            "feature_count": n_features,
-        })
-
-    return {"total": len(results), "files": results}
-
-
-@app.get("/geojson/{filename}/properties", tags=["GeoJSON"])
-async def get_geojson_properties(filename: str):
-    """
-    Return the list of property keys and a sample of values from a GeoJSON file.
-
-    Useful for a frontend to build dynamic filters / column selectors.
-    """
-    filepath = EXPORTS_DIR / filename
-    if not filepath.exists():
-        raise HTTPException(404, f"GeoJSON file '{filename}' not found")
-    if filepath.suffix.lower() != ".geojson":
-        raise HTTPException(400, "Not a GeoJSON file")
-
-    with open(filepath, "r", encoding="utf-8") as f:
-        data = json.load(f)
-
-    features = data.get("features", [])
-    if not features:
-        return {"filename": filename, "properties": {}, "sample_count": 0}
-
-    # Collect all property keys and sample values
-    all_keys: Dict[str, List[Any]] = {}
-    for feat in features[:50]:  # sample first 50
-        props = feat.get("properties", {})
-        for k, v in props.items():
-            all_keys.setdefault(k, []).append(v)
-
-    property_info = {}
-    for key, values in all_keys.items():
-        non_null = [v for v in values if v is not None]
-        property_info[key] = {
-            "sample_values": non_null[:5],
-            "type": type(non_null[0]).__name__ if non_null else "null",
-            "null_count": len(values) - len(non_null),
+    # ── image / raster ──────────────────────────────────────────────────────
+    if ext in (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".svg"):
+        with open(fpath, "rb") as f:
+            raw = f.read()
+        mime = _EXT_CONTENT_TYPE.get(ext, "application/octet-stream")
+        b64 = base64.b64encode(raw).decode("ascii")
+        return {
+            "type": "image",
+            "filename": filename,
+            "format": ext.lstrip("."),
+            "size_bytes": size,
+            "data_uri": f"data:{mime};base64,{b64}",
         }
 
+    # ── text / csv ──────────────────────────────────────────────────────────
+    if ext in (".csv", ".txt"):
+        with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read(200_000)
+        return {"type": "text", "filename": filename, "size_bytes": size, "data": text}
+
+    # ── fallback ────────────────────────────────────────────────────────────
     return {
+        "type": "binary",
         "filename": filename,
-        "total_features": len(features),
-        "properties": property_info,
-        "sample_count": min(len(features), 50),
+        "size_bytes": size,
+        "message": f"No preview for .{ext.lstrip('.')} files — download via /api/exports/{filename}",
     }
 
 
-@app.get("/geojson/{filename}/filter", tags=["GeoJSON"])
-async def filter_geojson(
-    filename: str,
-    property_name: str = Query(..., description="Property key to filter on"),
-    value: str = Query(..., description="Value to match (exact, case-insensitive)"),
-    max_features: int = Query(500, ge=1, le=10000),
-):
+# ═══════════════════════════════════════════════════════════════════════════════
+# WEBSOCKET
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.websocket("/ws/query")
+async def ws_query(ws: WebSocket):
     """
-    Filter a GeoJSON file by a property value and return matching features.
+    WebSocket for bidirectional interaction::
 
-    Example: ``/geojson/drought_affected_villages_navalgund.geojson/filter?property_name=village_name&value=Annigeri``
+        → {"query": "...", "session_id": "...", "user_id": "..."}
+        ← {"type": "query_id",    "data": "abc123"}
+        ← {"type": "log",         "data": "..."}   (repeated)
+        ← {"type": "result",      "data": "..."}
+        ← {"type": "exports",     "data": [...]}
+        ← {"type": "code",        "data": [...]}
+        ← {"type": "duration_ms", "data": 12345.6}
+        ← {"type": "done",        "data": null}
     """
-    filepath = EXPORTS_DIR / filename
-    if not filepath.exists():
-        raise HTTPException(404, f"GeoJSON file '{filename}' not found")
+    await ws.accept()
+    logger.info("WebSocket connected")
 
-    with open(filepath, "r", encoding="utf-8") as f:
-        data = json.load(f)
+    try:
+        while True:
+            payload = await ws.receive_json()
+            query_text = (payload.get("query") or "").strip()
+            if not query_text:
+                await ws.send_json({"type": "error", "data": "Empty query"})
+                continue
 
-    features = data.get("features", [])
-    matched = []
-    for feat in features:
-        prop_val = feat.get("properties", {}).get(property_name)
-        if prop_val is not None and str(prop_val).lower() == value.lower():
-            matched.append(feat)
-            if len(matched) >= max_features:
-                break
+            qid = store.create(
+                query_text,
+                payload.get("session_id"),
+                payload.get("user_id"),
+            )
+            await ws.send_json({"type": "query_id", "data": qid})
 
-    return {
-        "type": "FeatureCollection",
-        "features": matched,
-        "_filter": {
-            "property": property_name,
-            "value": value,
-            "total_matched": len(matched),
-            "total_features": len(features),
-        },
-    }
+            # launch agent
+            thread = threading.Thread(target=_run_agent, args=(qid,), daemon=True)
+            thread.start()
+
+            # stream back
+            cursor = 0
+            while True:
+                snap = store.get(qid)
+                if snap is None:
+                    break
+
+                logs: list = snap["logs"]
+                if len(logs) > cursor:
+                    for line in logs[cursor:]:
+                        await ws.send_json({"type": "log", "data": line})
+                    cursor = len(logs)
+
+                if snap["status"] in ("completed", "failed"):
+                    if snap["status"] == "completed":
+                        await ws.send_json({"type": "result", "data": snap["result"]})
+                        await ws.send_json({"type": "exports", "data": snap.get("new_exports", [])})
+                        await ws.send_json({"type": "code", "data": snap.get("code_blocks", [])})
+                        await ws.send_json({"type": "duration_ms", "data": snap["duration_ms"]})
+                    else:
+                        await ws.send_json({"type": "error", "data": snap["error"]})
+                        await ws.send_json({"type": "duration_ms", "data": snap["duration_ms"]})
+
+                    await ws.send_json({"type": "done", "data": qid})
+                    break
+
+                await asyncio.sleep(0.4)
+
+    except WebSocketDisconnect:
+        logger.info("WebSocket disconnected")
+    except Exception as exc:
+        logger.error("WebSocket error: %s", exc)
 
 
-# ============================================================================
-# Startup / Shutdown events
-# ============================================================================
+# ═══════════════════════════════════════════════════════════════════════════════
+# LIFECYCLE HOOKS
+# ═══════════════════════════════════════════════════════════════════════════════
 
 @app.on_event("startup")
-async def on_startup():
-    print("🚀 CoreStack API server starting…")
-    print(f"📂 Exports directory: {EXPORTS_DIR}")
-    print(f"📊 Export files: {len(_list_export_filenames())}")
+async def _on_startup():
+    n = len(_scan_exports())
+    logger.info("CoreStack API ready  │  exports_dir=%s  │  %d files", EXPORTS_DIR, n)
 
 
 @app.on_event("shutdown")
-async def on_shutdown():
-    """Flush Langfuse buffer and shut down the thread pool."""
+async def _on_shutdown():
     try:
-        from langfuse_observability import shutdown as lf_shutdown
         lf_shutdown()
-        print("✅ Langfuse flushed on shutdown")
     except Exception:
         pass
-    _executor.shutdown(wait=False)
-    print("✅ API server stopped")
-
-
-# ============================================================================
-# Direct execution (for development)
-# ============================================================================
-
-if __name__ == "__main__":
-    import uvicorn
-
-    uvicorn.run(
-        "api:app",
-        host="127.0.0.1",
-        port=8000,
-        reload=True,
-        log_level="info",
-    )
-
+    logger.info("CoreStack API stopped")
