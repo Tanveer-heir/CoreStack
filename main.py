@@ -803,23 +803,31 @@ OUTPUTS (MANDATORY — produce ALL of these):
 
 **Query Type 3: "Tree Cover Loss / Deforestation in [Village] Since [Year]"**
 ✅ CORRECT: The deforestation change detection raster
-⚠️ The ACTUAL API layer name is: `"Change Detection Raster (change_dharwad_navalgund_Deforestation)"`
+⚠️ The API layer name follows pattern: `"Change Detection Raster (change_<district>_<tehsil>_Deforestation)"`
+   e.g., `change_dharwad_kundgol_Deforestation` for Kundgol tehsil, `change_dharwad_navalgund_Deforestation` for Navalgund
    Match with: `'deforestation' in layer['layer_name'].lower()`
    For degradation: `'degradation' in layer['layer_name'].lower()`
 ⛔ NEVER search for 'tree_cover_loss' or 'change_tree_cover_loss' — those names do NOT exist in the API.
+
+⚠️ CRITICAL — TEHSIL MATCHING:
+- The user's query specifies a village and tehsil. You MUST include the CORRECT TEHSIL in fetch_corestack_data().
+- If user says "Shirur Village, Kundgol" → fetch data for KUNDGOL, NOT Navalgund.
+- After fetching, VERIFY the layer name contains the correct tehsil: e.g., `change_dharwad_kundgol_Deforestation`
+- If the layer name contains the WRONG tehsil, re-fetch with the correct tehsil name in the query.
 
 🔴 MANDATORY: For this query type, COPY the code from EXAMPLE 2 below almost verbatim.
    The code fetches the Deforestation change detection raster, gets the VILLAGE boundary using
    osmnx (multi-query fallback), clips the raster to the village using rasterio.mask.mask(),
    computes loss area in hectares, creates a visualization PNG, AND exports a deforestation summary GeoJSON.
 
-ACTUAL CHANGE DETECTION LAYER NAMES FROM API (confirmed):
-- `"Change Detection Raster (change_dharwad_navalgund_Deforestation)"` — tree cover loss
-- `"Change Detection Raster (change_dharwad_navalgund_Afforestation)"` — tree cover gain
-- `"Change Detection Raster (change_dharwad_navalgund_Degradation)"` — land degradation
-- `"Change Detection Raster (change_dharwad_navalgund_Urbanization)"` — urbanization (may 404)
-- `"Change Detection Raster (change_dharwad_navalgund_CropIntensity)"` — crop intensity change
-- `"Tree Overall Change Raster (overall_change_raster_dharwad_navalgund)"` — overall tree change
+ACTUAL CHANGE DETECTION LAYER NAMES FROM API — note the tehsil varies per query:
+- `"Change Detection Raster (change_<district>_<tehsil>_Deforestation)"` — tree cover loss
+- `"Change Detection Raster (change_<district>_<tehsil>_Afforestation)"` — tree cover gain
+- `"Change Detection Raster (change_<district>_<tehsil>_Degradation)"` — land degradation
+- `"Change Detection Raster (change_<district>_<tehsil>_CropIntensity)"` — crop intensity change
+- `"Tree Overall Change Raster (overall_change_raster_<district>_<tehsil>)"` — overall tree change
+Example for Kundgol: `change_dharwad_kundgol_Deforestation`
+Example for Navalgund: `change_dharwad_navalgund_Deforestation`
 
 WHY CHANGE RASTER?
 - Pre-computed deforestation detection (2017-2022)
@@ -829,6 +837,7 @@ WHY CHANGE RASTER?
 ⚠️ SANDBOX CONSTRAINTS (CRITICAL — violations cause instant failure):
 - NEVER use bare `open()` — use `rasterio.MemoryFile(bytes)` to read rasters from downloaded bytes.
 - NEVER reproject to UTM — use degree-based math for area calculation.
+- For rasterio.mask.mask() village clipping: `from shapely.geometry import mapping as shapely_mapping` then `village_geoms = [shapely_mapping(village_gdf.geometry.iloc[0])]` — NEVER pass the raw function or use `.__geo_interface__`.
 - `rasterio.open(path, 'w', ...)` IS allowed (it's a module method, not bare open).
 - `plt.savefig(...)` IS allowed.
 
@@ -845,6 +854,12 @@ FALLBACK: If custom time period (e.g., "2018-2024"):
 ⛔ NEVER use any layer with "Urbanization" or "change_urbanization" in the name. Those layers return 404.
 ⛔ NEVER search for "change_urbanization_raster". It does NOT work.
 
+⚠️ CRITICAL — TEHSIL MATCHING:
+- LULC raster names follow: `LULC_YY_YY_<district>_<tehsil>_level_3` (e.g., `LULC_18_19_dharwad_kundgol_level_3`)
+- You MUST include the CORRECT TEHSIL from the user's query in fetch_corestack_data().
+- If user says "Shirur Village, Kundgol" → fetch for KUNDGOL, NOT Navalgund.
+- VERIFY fetched layer names contain the correct tehsil before proceeding.
+
 🔴 MANDATORY: For this query type, COPY the code from EXAMPLE 2b below almost verbatim.
    The code gets the VILLAGE boundary using osmnx (multi-query fallback), downloads 2 LULC rasters,
    clips both to the village using rasterio.mask.mask(), then computes cropland→built-up change.
@@ -853,6 +868,7 @@ FALLBACK: If custom time period (e.g., "2018-2024"):
 - NEVER use bare `open()` — it is BLOCKED by the sandbox executor. Use `rasterio.MemoryFile(bytes)` to read rasters from downloaded bytes.
 - NEVER reproject to UTM using `calculate_default_transform` — the LULC rasters are 4911x5826 pixels in EPSG:4326 (~0.00009° resolution). Reprojecting to UTM with degree-resolution causes a 300+ PB memory allocation crash.
 - For area calculation, use degree-based math: `px_area = (dx_deg * 111320 * cos(lat_rad)) * (dy_deg * 110540) / 10000` hectares.
+- For rasterio.mask.mask() village clipping: `from shapely.geometry import mapping as shapely_mapping` then `village_geoms = [shapely_mapping(village_gdf.geometry.iloc[0])]` — NEVER pass the raw function.
 - `rasterio.open(path, 'w', ...)` IS allowed (it's a module method, not bare open).
 - `plt.savefig(...)` IS allowed.
 
@@ -2085,7 +2101,11 @@ For multi-region layers: Read ALL URLs, concat GeoDataFrames, then analyze.
 				with memfile.open() as src:
 					# Clip raster to village boundary if available
 					if village_gdf is not None:
-						village_geoms = [village_gdf.geometry.iloc[0].__geo_interface__]
+						# ⚠️ Convert GeoDataFrame geometry to a dict for rasterio.mask
+						# Use mapping() to get a GeoJSON-like dict from the Shapely geometry
+						from shapely.geometry import mapping as shapely_mapping
+						village_geom_dict = shapely_mapping(village_gdf.geometry.iloc[0])
+						village_geoms = [village_geom_dict]
 						loss_data, transform = rio_mask(src, village_geoms, crop=True, nodata=0)
 						loss_data = loss_data[0]  # rio_mask returns (bands, h, w)
 						# Recompute bounds from transform and shape
@@ -2124,7 +2144,7 @@ For multi-region layers: Read ALL URLs, concat GeoDataFrames, then analyze.
 						'crs': crs, 'transform': transform, 'nodata': 0
 					}}
 					with rasterio.open('./exports/tree_cover_loss_change.tif', 'w', **change_meta) as dst:
-						dst.write(loss_mask, 1)
+						dst.write(loss_mask * 255, 1)  # Scale 0/1 → 0/255 so TIF is visible in image viewers
 					print(f"Change raster saved: ./exports/tree_cover_loss_change.tif")
 					print(f"\\nTotal tree cover loss: {{loss_area_ha:.2f}} hectares")
 
@@ -2240,7 +2260,9 @@ For multi-region layers: Read ALL URLs, concat GeoDataFrames, then analyze.
 			print("WARNING: Could not geocode village. Using full tehsil.")
 			village_name = "Tehsil"
 
-		village_geoms = [village_gdf.geometry.iloc[0].__geo_interface__] if village_gdf is not None else None
+		# ⚠️ Convert village geometry to dict for rasterio.mask — use mapping() function
+		from shapely.geometry import mapping as shapely_mapping
+		village_geoms = [shapely_mapping(village_gdf.geometry.iloc[0])] if village_gdf is not None else None
 
 		# Step 4: Open rasters using rasterio.MemoryFile (sandbox-safe) + clip to village
 		with rasterio.MemoryFile(r_old_bytes) as memfile:
@@ -2309,7 +2331,7 @@ For multi-region layers: Read ALL URLs, concat GeoDataFrames, then analyze.
 		change_meta = old_meta.copy()
 		change_meta.update(dtype='uint8', count=1, nodata=0)
 		with rasterio.open('./exports/crop_to_builtup_change.tif', 'w', **change_meta) as dst:
-			dst.write(crop_to_builtup, 1)
+			dst.write(crop_to_builtup * 255, 1)  # Scale 0/1 → 0/255 so TIF is visible
 		print(f"Change raster saved: ./exports/crop_to_builtup_change.tif")
 
 		print(f"\\nCropland to Built-up conversion: {{total_change_ha:.2f}} hectares")
@@ -4295,9 +4317,9 @@ if __name__ == "__main__":
 	# print("="*70)
 	# run_hybrid_agent("Could you show how surface water availability has changed over the years in Shirur Village, Kundgol, Dharwad, Karnataka?")
 
-	print("Running query #3 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
-	print("="*70)
-	run_hybrid_agent("Can you show me areas that have lost tree cover in Shirur Village, Kundgol, Dharwad, Karnataka since 2018? also hectares of degraded area?")
+	# print("Running query #3 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+	# print("="*70)
+	# run_hybrid_agent("Can you show me areas that have lost tree cover in Shirur Village, Kundgol, Dharwad, Karnataka since 2018? also hectares of degraded area?")
 
 	# print("Running query #4 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
 	# print("="*70)
