@@ -719,23 +719,46 @@ LAYER SELECTION DECISION FRAMEWORK (WITH EXPLANATIONS)
 ❌ WRONG CHOICE: watershed timeseries
 
 🔴 MANDATORY: For this query type, COPY the code from EXAMPLE 1 below almost verbatim.
-   The code fetches the Cropping Intensity vector, extracts yearly columns, computes averages,
-   plots a time-series line chart PNG, AND exports a GeoJSON summary per MWS.
+   The code fetches the Cropping Intensity vector at TEHSIL level, then narrows down to a
+   SPECIFIC VILLAGE by fetching the village boundary from OpenStreetMap via osmnx, computing
+   the spatial intersection of MWS polygons with the village boundary, and then computing
+   averages / plotting / exporting ONLY for the MWS that fall within that village.
+
+WORKFLOW (village-level CI analysis):
+1. Fetch cropping_intensity_vector from CoreStack (tehsil-level, ~115 MWS polygons)
+2. Extract the VILLAGE NAME from the user query (e.g., "Shiroor")
+3. Use `osmnx.geocode_to_gdf("<VillageName>, <TehsilName>, <DistrictName>, <StateName>, India")` to get the village boundary polygon from OpenStreetMap
+4. Spatially intersect the MWS GeoDataFrame with the village boundary using `gpd.overlay(crop_gdf, village_gdf, how='intersection')`
+5. This filters down from ~115 MWS to only those touching the village (typically 5-15 MWS)
+6. Compute average CI per year ONLY for the village-filtered MWS
+7. Plot time-series line chart + export per-MWS GeoJSON
 
 WHY SPATIAL?
 - Cropping intensity is SPATIALLY VARIABLE (different fields = different intensity)
 - You want: total area under crops in village, which varies by location
 - Data structure: GeoDataFrame with polygon features
 - Temporal aspect: Stored as yearly columns (cropping_intensity_2017, 2018, ..., 2023)
-- Analysis approach: Sum/average these columns across village polygons, plot trend
+- Analysis approach: Filter MWS to village boundary, then average these columns, plot trend
 
 ⚠️ CRITICAL LAYER NAME MATCHING:
 - Cropping Intensity layer: `"Cropping Intensity (dharwad_navalgund_intensity)"` — match with `'cropping' in layer['layer_name'].lower() and 'intensity' in layer['layer_name'].lower()`
 - ALWAYS print ALL vector layer names FIRST: `for l in vector_layers: print(l['layer_name'])`
 
+⚠️ VILLAGE BOUNDARY FROM OSM:
+- Use `import osmnx as ox` then `ox.geocode_to_gdf(query)`
+- ⚠️ OSM tehsil spellings OFTEN DIFFER from CoreStack (e.g., CoreStack="Kundgol" but OSM="Kundagola")
+- ALWAYS try MULTIPLE geocode queries, progressively simpler, until one succeeds:
+  1. `f"{{village}}, {{tehsil}}, {{district}}, {{state}}, India"` (full — may fail due to tehsil spelling)
+  2. `f"{{village}}, {{district}}, {{state}}, India"` (skip tehsil — usually works)
+  3. `f"{{village}}, {{state}}, India"` (just state — last resort)
+- Loop through these queries with try/except, break on first success
+- If osmnx fails for ALL queries, try `geopy.geocoders.Nominatim` with same query list → create ~2 km buffer polygon from coordinates
+- Reproject to match crop_gdf CRS before intersection: `village_gdf = village_gdf.to_crs(crop_gdf.crs)`
+- Only fall back to full tehsil if BOTH osmnx AND geopy fail
+
 OUTPUTS (MANDATORY — produce ALL of these):
-- PNG: `./exports/cropping_intensity_over_years.png` — time-series line chart of average CI per year
-- GeoJSON: `./exports/cropping_intensity_by_mws.geojson` — each MWS polygon with yearly CI values and mean CI
+- PNG: `./exports/cropping_intensity_over_years_<village>.png` — time-series line chart of average CI per year for the village
+- GeoJSON: `./exports/cropping_intensity_by_mws_<village>.geojson` — each MWS polygon (clipped to village) with yearly CI values and mean CI
 
 WHY NOT TIMESERIES?
 - Watershed timeseries measures aggregate WATER BALANCE (runoff, precip, ET)
@@ -1687,7 +1710,9 @@ For multi-region layers: Read ALL URLs, concat GeoDataFrames, then analyze.
 		# ╔══════════════════════════════════════════════════════════════╗
 		# ║ EXAMPLE 1: CROPPING INTENSITY OVER YEARS (Vector)            ║
 		# ║ ⚠️ For Query Type 1, COPY THIS CODE ALMOST VERBATIM.         ║
-		# ║ Produces: time-series PNG + per-MWS GeoJSON                  ║
+		# ║ Fetches tehsil-level CI, then filters to a SPECIFIC VILLAGE  ║
+		# ║ using its boundary from OpenStreetMap (osmnx).                ║
+		# ║ Produces: village-level time-series PNG + per-MWS GeoJSON     ║
 		# ╚══════════════════════════════════════════════════════════════╝
 		# FIRST: Print all vector layer names to find the right one
 		print("Available vector layers:")
@@ -1708,15 +1733,73 @@ For multi-region layers: Read ALL URLs, concat GeoDataFrames, then analyze.
 
 		if crop_gdf is not None:
 			print(f"Cropping intensity GDF columns: {{crop_gdf.columns.tolist()}}")
-			print(f"Cropping intensity GDF shape: {{crop_gdf.shape}}")
+			print(f"Cropping intensity GDF shape (full tehsil): {{crop_gdf.shape}}")
 
-			# Step 2: Extract year columns (e.g., 'cropping_intensity_2017')
+			# Step 2: Get VILLAGE boundary from OpenStreetMap
+			# ═══ PARAMETERS — Extract these from the user's query ═══
+			import osmnx as ox
+			village_name = "Shirur"   # ← Replace with the village name from the user's query
+			tehsil_name  = "Kundgol"  # ← Replace with user's tehsil
+			district_name = "Dharwad" # ← Replace with user's district
+			state_name    = "Karnataka"
+
+			# Build MULTIPLE geocode queries — OSM tehsil spellings often differ
+			# from CoreStack (e.g., CoreStack="Kundgol" but OSM="Kundagola")
+			# Try progressively simpler queries until one succeeds
+			geocode_queries = [
+				f"{{village_name}}, {{tehsil_name}}, {{district_name}}, {{state_name}}, India",  # full
+				f"{{village_name}}, {{district_name}}, {{state_name}}, India",                    # skip tehsil
+				f"{{village_name}}, {{state_name}}, India",                                       # just state
+			]
+
+			village_gdf = None
+			# Try osmnx first (returns full boundary polygon if available)
+			for gq in geocode_queries:
+				try:
+					print(f"Trying osmnx: {{gq}}")
+					village_gdf = ox.geocode_to_gdf(gq)
+					village_gdf = village_gdf.to_crs(crop_gdf.crs)
+					print(f"✅ Village boundary fetched: {{village_gdf.shape}}, area: {{village_gdf.geometry.area.sum():.6f}} sq deg")
+					break
+				except Exception:
+					continue
+
+			# If osmnx failed, try geopy (returns point coords → create buffer)
+			if village_gdf is None:
+				print("osmnx failed for all queries. Trying geopy for coordinates...")
+				from geopy.geocoders import Nominatim as GeopyNominatim
+				from shapely.geometry import Point
+				geolocator = GeopyNominatim(user_agent="corestack_agent")
+				for gq in geocode_queries:
+					try:
+						location = geolocator.geocode(gq)
+						if location:
+							print(f"✅ Geopy found village at: {{location.latitude:.4f}}, {{location.longitude:.4f}} (query: {{gq}})")
+							pt = Point(location.longitude, location.latitude)
+							village_poly = pt.buffer(0.02)  # ~2 km radius
+							village_gdf = gpd.GeoDataFrame(geometry=[village_poly], crs="EPSG:4326")
+							village_gdf = village_gdf.to_crs(crop_gdf.crs)
+							print(f"Created ~2 km buffer polygon around village centroid")
+							break
+					except Exception:
+						continue
+
+			if village_gdf is None:
+				print("WARNING: Could not geocode village. Falling back to full tehsil-level analysis")
+				village_name = "Tehsil"
+
+			# Step 3: Spatially intersect MWS with village boundary
+			if village_gdf is not None:
+				crop_gdf = gpd.overlay(crop_gdf, village_gdf[['geometry']], how='intersection')
+				print(f"Filtered to {{len(crop_gdf)}} MWS intersecting {{village_name}}")
+
+			# Step 4: Extract year columns (e.g., 'cropping_intensity_2017')
 			import re
 			year_cols = [col for col in crop_gdf.columns if 'cropping_intensity_' in col.lower() and re.search(r'\\d{{4}}', col)]
 			year_cols = sorted(year_cols)
 			print(f"Year columns found: {{year_cols}}")
 
-			# Step 3: Compute average CI per year across ALL MWS
+			# Step 5: Compute average CI per year across village-filtered MWS
 			years_data = []
 			for col in year_cols:
 				year_match = re.search(r'(\\d{{4}})', col)
@@ -1730,7 +1813,7 @@ For multi-region layers: Read ALL URLs, concat GeoDataFrames, then analyze.
 			print(f"Years: {{years_list}}")
 			print(f"Values: {{values_list}}")
 
-			# Step 4: Plot time-series PNG
+			# Step 6: Plot time-series PNG
 			import matplotlib
 			matplotlib.use('Agg')
 			import matplotlib.pyplot as plt
@@ -1739,24 +1822,26 @@ For multi-region layers: Read ALL URLs, concat GeoDataFrames, then analyze.
 			ax.fill_between(years_list, values_list, alpha=0.15, color='#3b82f6')
 			ax.set_xlabel('Year', fontsize=12)
 			ax.set_ylabel('Average Cropping Intensity', fontsize=12)
-			ax.set_title('Cropping Intensity Over Years — Navalgund, Dharwad', fontsize=14)
+			ax.set_title(f'Cropping Intensity Over Years — {{village_name}}', fontsize=14)
 			ax.grid(True, alpha=0.3)
 			ax.set_xticks(years_list)
 			plt.tight_layout()
-			plt.savefig('./exports/cropping_intensity_over_years.png', dpi=150, bbox_inches='tight')
+			png_path = f'./exports/cropping_intensity_over_years_{{village_name.lower().replace(" ", "_")}}.png'
+			plt.savefig(png_path, dpi=150, bbox_inches='tight')
 			plt.close()
-			print("Saved: ./exports/cropping_intensity_over_years.png")
+			print(f"Saved: {{png_path}}")
 
-			# Step 5: Compute per-MWS mean CI and export GeoJSON
+			# Step 7: Compute per-MWS mean CI and export GeoJSON
 			crop_gdf['mean_ci'] = crop_gdf[year_cols].mean(axis=1)
 			export_cols = ['geometry', 'mean_ci'] + year_cols
 			if 'uid' in crop_gdf.columns:
 				export_cols = ['uid'] + export_cols
 			crop_export = crop_gdf[[c for c in export_cols if c in crop_gdf.columns]]
-			crop_export.to_file('./exports/cropping_intensity_by_mws.geojson', driver='GeoJSON')
-			print(f"Saved: ./exports/cropping_intensity_by_mws.geojson ({{len(crop_export)}} MWS)")
+			geojson_path = f'./exports/cropping_intensity_by_mws_{{village_name.lower().replace(" ", "_")}}.geojson'
+			crop_export.to_file(geojson_path, driver='GeoJSON')
+			print(f"Saved: {{geojson_path}} ({{len(crop_export)}} MWS)")
 
-			final_answer(f"Cropping intensity trend plotted for {{len(years_list)}} years ({{years_list[0]}}–{{years_list[-1]}}). Average CI ranged from {{min(values_list):.2f}} to {{max(values_list):.2f}}.\\n\\nExports:\\n- ./exports/cropping_intensity_over_years.png\\n- ./exports/cropping_intensity_by_mws.geojson")
+			final_answer(f"Cropping intensity trend for {{village_name}} plotted for {{len(years_list)}} years ({{years_list[0]}}–{{years_list[-1]}}). Average CI ranged from {{min(values_list):.2f}} to {{max(values_list):.2f}}. Filtered to {{len(crop_gdf)}} MWS within village boundary.\\n\\nExports:\\n- {{png_path}}\\n- {{geojson_path}}")
 		else:
 			print("ERROR: Could not find Cropping Intensity layer!")
 			final_answer("Could not find Cropping Intensity layer from CoreStack data.")
@@ -4077,23 +4162,30 @@ def run_hybrid_agent(user_query: str, exports_dir: str = None, session_id: str =
 # EXAMPLE USAGE & COMPARISON
 # ============================================================================
 
-# if __name__ == "__main__":
-# 	"""
-# 	Example usage of the hybrid agent.
+if __name__ == "__main__":
+	"""
+	Example usage of the hybrid agent.
 
-# 	All queries in this run share one Langfuse session so they appear as a
-# 	single conversation in the dashboard.  Each run_hybrid_agent() call
-# 	creates its own trace within that session.
-# 	"""
-# 	print("Bot TEST")
-# 	print("="*70)
+	All queries in this run share one Langfuse session so they appear as a
+	single conversation in the dashboard.  Each run_hybrid_agent() call
+	creates its own trace within that session.
+	"""
+	print("Bot TEST")
+	print("="*70)
 
-# 	# Create a single session ID to group all traces from this run
-# 	_session_id = generate_session_id()
-# 	print(f"📊 Langfuse session ID: {_session_id}")
+	print("Running query #1 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+	print("="*70)
+	run_hybrid_agent("Could you show how cropping intensity has changed over the years in Shirur Village, Kundgol, Dharwad, Karnataka?")
 
-# 	print("Running query #1 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
-# 	print("="*70)
+
+	# Create a single session ID to group all traces from this run
+	# _session_id = generate_session_id()
+	# print(f"📊 Langfuse session ID: {_session_id}")
+
+	# print("Running query #1 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+	# print("="*70)
+
+	
 
 # 	try:
 # 		result = run_hybrid_agent(
@@ -4114,10 +4206,7 @@ def run_hybrid_agent(user_query: str, exports_dir: str = None, session_id: str =
 # 		# Ensure all buffered events reach Langfuse before exit
 # 		lf_shutdown()
 
-# 	# print("Running query #2 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
-# 	# print("="*70)
-# 	# run_hybrid_agent("Could you show how surface water availability has changed over the years in Navalgund, Dharwad, Karnataka?")
-
+ 	
 # 	# print("Running query #3 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
 # 	# print("="*70)
 # 	# run_hybrid_agent("Can you show me areas that have lost tree cover in Navalgund, Dharwad, Karnataka since 2018? also hectares of degraded area?")
@@ -4126,7 +4215,7 @@ def run_hybrid_agent(user_query: str, exports_dir: str = None, session_id: str =
 # 	# print("="*70)
 # 	# run_hybrid_agent("How much cropland in Navalgund, Dharwad, Karnataka has turned into built up since 2018? can you show me those regions?")
 
-#     # print("Running query #5 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+# 	# print("Running query #5 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
 # 	# print("="*70)
 # 	# run_hybrid_agent("Which villages in Navalgund, Dharwad Karnataka among the ones available on Core Stack have experienced droughts? ")
 
