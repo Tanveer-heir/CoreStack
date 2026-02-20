@@ -771,7 +771,9 @@ WHY NOT TIMESERIES?
 ⚠️  OPTIONAL CONTEXT: water_balance (timeseries) for watershed-level trends
 
 🔴 MANDATORY: For this query type, COPY the code from EXAMPLE 1b below almost verbatim.
-   The code fetches the Surface Water Bodies vector, aggregates water area by MWS per hydro-year,
+   The code fetches the Surface Water Bodies vector, gets the VILLAGE boundary using osmnx
+   (with multi-query fallback: full → skip tehsil → just state → geopy buffer),
+   spatially filters water bodies to the village, aggregates water area by MWS per hydro-year,
    plots a time-series line chart PNG, AND exports a GeoJSON summary per MWS.
 
 WHY SPATIAL?
@@ -807,8 +809,9 @@ OUTPUTS (MANDATORY — produce ALL of these):
 ⛔ NEVER search for 'tree_cover_loss' or 'change_tree_cover_loss' — those names do NOT exist in the API.
 
 🔴 MANDATORY: For this query type, COPY the code from EXAMPLE 2 below almost verbatim.
-   The code fetches the Deforestation change detection raster, computes loss area in hectares,
-   creates a visualization PNG, AND exports a deforestation summary GeoJSON.
+   The code fetches the Deforestation change detection raster, gets the VILLAGE boundary using
+   osmnx (multi-query fallback), clips the raster to the village using rasterio.mask.mask(),
+   computes loss area in hectares, creates a visualization PNG, AND exports a deforestation summary GeoJSON.
 
 ACTUAL CHANGE DETECTION LAYER NAMES FROM API (confirmed):
 - `"Change Detection Raster (change_dharwad_navalgund_Deforestation)"` — tree cover loss
@@ -830,9 +833,8 @@ WHY CHANGE RASTER?
 - `plt.savefig(...)` IS allowed.
 
 OUTPUTS (MANDATORY — produce ALL of these):
-- PNG: `./exports/deforestation_map.png` — spatial visualization of tree cover loss areas
-- GeoJSON: `./exports/deforestation_navalgund.geojson` — vectorized loss polygons with area in hectares
-- If user also asks for degradation: `./exports/degradation_navalgund.geojson`
+- GeoTIFF: `./exports/tree_cover_loss_change.tif` — change raster (0=no change, 1=tree cover loss)
+- Print total tree cover loss area in hectares
 
 FALLBACK: If custom time period (e.g., "2018-2024"):
 - Use land_use_land_cover_raster for specific years
@@ -844,6 +846,8 @@ FALLBACK: If custom time period (e.g., "2018-2024"):
 ⛔ NEVER search for "change_urbanization_raster". It does NOT work.
 
 🔴 MANDATORY: For this query type, COPY the code from EXAMPLE 2b below almost verbatim.
+   The code gets the VILLAGE boundary using osmnx (multi-query fallback), downloads 2 LULC rasters,
+   clips both to the village using rasterio.mask.mask(), then computes cropland→built-up change.
 
 ⚠️ SANDBOX CONSTRAINTS (CRITICAL — violations cause instant failure):
 - NEVER use bare `open()` — it is BLOCKED by the sandbox executor. Use `rasterio.MemoryFile(bytes)` to read rasters from downloaded bytes.
@@ -1871,16 +1875,66 @@ For multi-region layers: Read ALL URLs, concat GeoDataFrames, then analyze.
 
 		if sw_gdf is not None:
 			import numpy as np
+			sw_gdf = sw_gdf.to_crs('EPSG:4326')
 			print(f"Surface water GDF columns: {{sw_gdf.columns.tolist()}}")
-			print(f"Surface water GDF shape: {{sw_gdf.shape}}")
+			print(f"Surface water GDF shape (full tehsil): {{sw_gdf.shape}}")
 
-			# Step 2: Identify area columns (pattern: area_YY-YY)
+			# Step 2: Get VILLAGE boundary from OpenStreetMap
+			import osmnx as ox
+			village_name = "Shirur"   # ← Replace with village name from user's query
+			tehsil_name  = "Kundgol"  # ← Replace with user's tehsil
+			district_name = "Dharwad" # ← Replace with user's district
+			state_name    = "Karnataka"
+
+			geocode_queries = [
+				f"{{village_name}}, {{tehsil_name}}, {{district_name}}, {{state_name}}, India",
+				f"{{village_name}}, {{district_name}}, {{state_name}}, India",
+				f"{{village_name}}, {{state_name}}, India",
+			]
+
+			village_gdf = None
+			for gq in geocode_queries:
+				try:
+					print(f"Trying osmnx: {{gq}}")
+					village_gdf = ox.geocode_to_gdf(gq)
+					village_gdf = village_gdf.to_crs(sw_gdf.crs)
+					print(f"✅ Village boundary fetched: {{village_gdf.shape}}")
+					break
+				except Exception:
+					continue
+
+			if village_gdf is None:
+				print("osmnx failed. Trying geopy...")
+				from geopy.geocoders import Nominatim as GeopyNominatim
+				from shapely.geometry import Point
+				geolocator = GeopyNominatim(user_agent="corestack_agent")
+				for gq in geocode_queries:
+					try:
+						location = geolocator.geocode(gq)
+						if location:
+							print(f"✅ Geopy found: {{location.latitude:.4f}}, {{location.longitude:.4f}} ({{gq}})")
+							pt = Point(location.longitude, location.latitude)
+							village_poly = pt.buffer(0.02)
+							village_gdf = gpd.GeoDataFrame(geometry=[village_poly], crs="EPSG:4326")
+							village_gdf = village_gdf.to_crs(sw_gdf.crs)
+							break
+					except Exception:
+						continue
+
+			if village_gdf is not None:
+				sw_gdf = gpd.overlay(sw_gdf, village_gdf[['geometry']], how='intersection')
+				print(f"Filtered to {{len(sw_gdf)}} water bodies in {{village_name}}")
+			else:
+				print("WARNING: Could not geocode village. Using full tehsil.")
+				village_name = "Tehsil"
+
+			# Step 3: Identify area columns (pattern: area_YY-YY)
 			import re
-			area_cols = [col for col in sw_gdf.columns if re.match(r'area_\\d{{2}}-\\d{{2}}', col)]
+			area_cols = [col for col in sw_gdf.columns if re.match(r'area_\d{{2}}-\d{{2}}', col)]
 			area_cols = sorted(area_cols)
 			print(f"Area columns found: {{area_cols}}")
 
-			# Step 3: Aggregate by MWS_UID (sum water body areas per MWS per year)
+			# Step 4: Aggregate by MWS_UID (sum water body areas per MWS per year)
 			if 'MWS_UID' in sw_gdf.columns:
 				# Convert area cols to numeric
 				for col in area_cols:
@@ -1949,7 +2003,14 @@ For multi-region layers: Read ALL URLs, concat GeoDataFrames, then analyze.
 		import os, requests, rasterio, numpy as np, math
 		from rasterio.features import shapes as rio_shapes
 		from shapely.geometry import shape as shp_shape
+		from rasterio.mask import mask as rio_mask
 		os.makedirs('./exports', exist_ok=True)
+
+		# ═══ PARAMETERS — Extract from user's query ═══
+		village_name = "Shirur"   # ← Replace with village name from user's query
+		tehsil_name  = "Kundgol"  # ← Replace with user's tehsil
+		district_name = "Dharwad" # ← Replace with user's district
+		state_name    = "Karnataka"
 
 		# FIRST: Print all raster layer names to find the right one
 		print("Available raster layers:")
@@ -1982,12 +2043,63 @@ For multi-region layers: Read ALL URLs, concat GeoDataFrames, then analyze.
 			r_bytes = requests.get(url, timeout=120).content
 			print(f"Downloaded: {{len(r_bytes)}} bytes")
 
+			# Step 2b: Get VILLAGE boundary for raster clipping
+			import osmnx as ox
+			import geopandas as gpd
+			geocode_queries = [
+				f"{{village_name}}, {{tehsil_name}}, {{district_name}}, {{state_name}}, India",
+				f"{{village_name}}, {{district_name}}, {{state_name}}, India",
+				f"{{village_name}}, {{state_name}}, India",
+			]
+			village_gdf = None
+			for gq in geocode_queries:
+				try:
+					print(f"Trying osmnx: {{gq}}")
+					village_gdf = ox.geocode_to_gdf(gq)
+					village_gdf = village_gdf.to_crs('EPSG:4326')
+					print(f"✅ Village boundary fetched: {{village_gdf.shape}}")
+					break
+				except Exception:
+					continue
+			if village_gdf is None:
+				print("osmnx failed. Trying geopy...")
+				from geopy.geocoders import Nominatim as GeopyNominatim
+				from shapely.geometry import Point
+				geolocator = GeopyNominatim(user_agent="corestack_agent")
+				for gq in geocode_queries:
+					try:
+						location = geolocator.geocode(gq)
+						if location:
+							print(f"✅ Geopy found: {{location.latitude:.4f}}, {{location.longitude:.4f}} ({{gq}})")
+							pt = Point(location.longitude, location.latitude)
+							village_poly = pt.buffer(0.02)
+							village_gdf = gpd.GeoDataFrame(geometry=[village_poly], crs="EPSG:4326")
+							break
+					except Exception:
+						continue
+			if village_gdf is None:
+				print("WARNING: Could not geocode village. Using full tehsil.")
+				village_name = "Tehsil"
+
 			with rasterio.MemoryFile(r_bytes) as memfile:
 				with memfile.open() as src:
-					loss_data = src.read(1)
-					transform = src.transform
+					# Clip raster to village boundary if available
+					if village_gdf is not None:
+						village_geoms = [village_gdf.geometry.iloc[0].__geo_interface__]
+						loss_data, transform = rio_mask(src, village_geoms, crop=True, nodata=0)
+						loss_data = loss_data[0]  # rio_mask returns (bands, h, w)
+						# Recompute bounds from transform and shape
+						from rasterio.transform import array_bounds
+						bounds_arr = array_bounds(loss_data.shape[0], loss_data.shape[1], transform)
+						from collections import namedtuple
+						BBox = namedtuple('BBox', ['left', 'bottom', 'right', 'top'])
+						bounds = BBox(*bounds_arr)
+						print(f"Raster clipped to {{village_name}}: {{loss_data.shape}}")
+					else:
+						loss_data = src.read(1)
+						transform = src.transform
+						bounds = src.bounds
 					crs = src.crs
-					bounds = src.bounds
 
 					# Step 3: Mask to loss class (class == 1)
 					loss_data_clean = np.nan_to_num(loss_data, nan=0)
@@ -2005,49 +2117,18 @@ For multi-region layers: Read ALL URLs, concat GeoDataFrames, then analyze.
 					loss_area_ha = loss_pixels * px_area_ha
 					print(f"Tree cover loss area: {{loss_area_ha:.2f}} hectares ({{px_area_ha:.6f}} ha/px)")
 
-					# Step 5: Create visualization PNG
-					import matplotlib
-					matplotlib.use('Agg')
-					import matplotlib.pyplot as plt
-					from matplotlib.colors import ListedColormap
+					# Step 5: Save change raster as GeoTIFF
+					change_meta = {{
+						'driver': 'GTiff', 'dtype': 'uint8', 'count': 1,
+						'height': loss_mask.shape[0], 'width': loss_mask.shape[1],
+						'crs': crs, 'transform': transform, 'nodata': 0
+					}}
+					with rasterio.open('./exports/tree_cover_loss_change.tif', 'w', **change_meta) as dst:
+						dst.write(loss_mask, 1)
+					print(f"Change raster saved: ./exports/tree_cover_loss_change.tif")
+					print(f"\\nTotal tree cover loss: {{loss_area_ha:.2f}} hectares")
 
-					fig, ax = plt.subplots(figsize=(10, 10))
-					# Background: no-loss in dark grey, loss in red
-					display_data = np.where(loss_mask == 1, 2, np.where(loss_data_clean > 0, 1, 0))
-					cmap = ListedColormap(['#1a1a2e', '#2d3436', '#e74c3c'])
-					ax.imshow(display_data, cmap=cmap, extent=[bounds.left, bounds.right, bounds.bottom, bounds.top])
-					ax.set_title(f'Tree Cover Loss — Navalgund, Dharwad\\n({{loss_area_ha:.1f}} hectares lost)', fontsize=14)
-					ax.set_xlabel('Longitude')
-					ax.set_ylabel('Latitude')
-					# Legend
-					from matplotlib.patches import Patch
-					legend_elements = [Patch(facecolor='#e74c3c', label=f'Loss ({{loss_area_ha:.1f}} ha)'),
-					                   Patch(facecolor='#2d3436', label='No change')]
-					ax.legend(handles=legend_elements, loc='lower right', fontsize=10)
-					plt.tight_layout()
-					plt.savefig('./exports/deforestation_map.png', dpi=150, bbox_inches='tight')
-					plt.close()
-					print("Saved: ./exports/deforestation_map.png")
-
-					# Step 6: Vectorize loss pixels → GeoJSON polygons
-					loss_polys = []
-					for geom, val in rio_shapes(loss_mask, transform=transform):
-						if val == 1:
-							loss_polys.append(shp_shape(geom))
-
-					if loss_polys:
-						loss_gdf = gpd.GeoDataFrame(
-							{{'loss_type': ['tree_cover_loss'] * len(loss_polys),
-							  'area_ha': [p.area * m_per_deg_lon * m_per_deg_lat / 10000 for p in loss_polys]}},
-							geometry=loss_polys,
-							crs=crs
-						)
-						loss_gdf.to_file('./exports/deforestation_navalgund.geojson', driver='GeoJSON')
-						print(f"Saved: ./exports/deforestation_navalgund.geojson ({{len(loss_gdf)}} polygons)")
-					else:
-						print("No loss polygons to vectorize")
-
-					final_answer(f"Tree cover loss analysis complete: {{loss_area_ha:.1f}} hectares of forest lost in Navalgund, Dharwad.\\n\\nExports:\\n- ./exports/deforestation_map.png\\n- ./exports/deforestation_navalgund.geojson")
+					final_answer(f"Tree cover loss: {{loss_area_ha:.2f}} hectares degraded.\\nExports:\\n- Change raster: ./exports/tree_cover_loss_change.tif")
 		else:
 			print("ERROR: Could not find tree cover loss raster layer!")
 			final_answer("Could not find tree cover loss raster from CoreStack data.")
@@ -2064,10 +2145,15 @@ For multi-region layers: Read ALL URLs, concat GeoDataFrames, then analyze.
 		# ║    area using degree-based math (accurate to <1% at 15°N).   ║
 		# ╚══════════════════════════════════════════════════════════════╝
 		import os, requests, rasterio, numpy as np, math
+		from rasterio.mask import mask as rio_mask
 		os.makedirs('./exports', exist_ok=True)
 
 		# ═══ PARAMETERS — Extract these from the user's query ═══
 		LOCATION = "Navalgund Dharwad Karnataka"  # ← Replace with user's tehsil district state
+		village_name = "Shirur"   # ← Replace with village name from user's query
+		tehsil_name  = "Kundgol"  # ← Replace with user's tehsil
+		district_name = "Dharwad" # ← Replace with user's district
+		state_name    = "Karnataka"
 
 		# Step 1: Fetch data from CoreStack
 		data = fetch_corestack_data(query=f"{{LOCATION}} LULC raster")
@@ -2116,20 +2202,74 @@ For multi-region layers: Read ALL URLs, concat GeoDataFrames, then analyze.
 		r_new_bytes = requests.get(new_url, timeout=120).content
 		print(f"Downloaded new LULC: {{len(r_new_bytes)}} bytes")
 
-		# Step 4: Open rasters using rasterio.MemoryFile (sandbox-safe)
+		# Step 3b: Get VILLAGE boundary for raster clipping
+		import osmnx as ox
+		import geopandas as gpd
+		geocode_queries = [
+			f"{{village_name}}, {{tehsil_name}}, {{district_name}}, {{state_name}}, India",
+			f"{{village_name}}, {{district_name}}, {{state_name}}, India",
+			f"{{village_name}}, {{state_name}}, India",
+		]
+		village_gdf = None
+		for gq in geocode_queries:
+			try:
+				print(f"Trying osmnx: {{gq}}")
+				village_gdf = ox.geocode_to_gdf(gq)
+				village_gdf = village_gdf.to_crs('EPSG:4326')
+				print(f"✅ Village boundary fetched: {{village_gdf.shape}}")
+				break
+			except Exception:
+				continue
+		if village_gdf is None:
+			print("osmnx failed. Trying geopy...")
+			from geopy.geocoders import Nominatim as GeopyNominatim
+			from shapely.geometry import Point
+			geolocator = GeopyNominatim(user_agent="corestack_agent")
+			for gq in geocode_queries:
+				try:
+					location = geolocator.geocode(gq)
+					if location:
+						print(f"✅ Geopy found: {{location.latitude:.4f}}, {{location.longitude:.4f}} ({{gq}})")
+						pt = Point(location.longitude, location.latitude)
+						village_poly = pt.buffer(0.02)
+						village_gdf = gpd.GeoDataFrame(geometry=[village_poly], crs="EPSG:4326")
+						break
+				except Exception:
+					continue
+		if village_gdf is None:
+			print("WARNING: Could not geocode village. Using full tehsil.")
+			village_name = "Tehsil"
+
+		village_geoms = [village_gdf.geometry.iloc[0].__geo_interface__] if village_gdf is not None else None
+
+		# Step 4: Open rasters using rasterio.MemoryFile (sandbox-safe) + clip to village
 		with rasterio.MemoryFile(r_old_bytes) as memfile:
 			with memfile.open() as src_old:
-				old_data = np.nan_to_num(src_old.read(1), nan=0).astype(int)
+				if village_geoms is not None:
+					old_data, old_transform = rio_mask(src_old, village_geoms, crop=True, nodata=0)
+					old_data = np.nan_to_num(old_data[0], nan=0).astype(int)
+					from rasterio.transform import array_bounds
+					from collections import namedtuple
+					BBox = namedtuple('BBox', ['left', 'bottom', 'right', 'top'])
+					old_bounds = BBox(*array_bounds(old_data.shape[0], old_data.shape[1], old_transform))
+					print(f"Old raster clipped to {{village_name}}: {{old_data.shape}}")
+				else:
+					old_data = np.nan_to_num(src_old.read(1), nan=0).astype(int)
+					old_transform = src_old.transform
+					old_bounds = src_old.bounds
+					print(f"Old raster shape: {{old_data.shape}}")
 				old_meta = src_old.meta.copy()
-				old_transform = src_old.transform
 				old_crs = src_old.crs
-				old_bounds = src_old.bounds
-				print(f"Old raster shape: {{old_data.shape}}, CRS: {{old_crs}}")
 
 		with rasterio.MemoryFile(r_new_bytes) as memfile:
 			with memfile.open() as src_new:
-				new_data = np.nan_to_num(src_new.read(1), nan=0).astype(int)
-				print(f"New raster shape: {{new_data.shape}}")
+				if village_geoms is not None:
+					new_data, _ = rio_mask(src_new, village_geoms, crop=True, nodata=0)
+					new_data = np.nan_to_num(new_data[0], nan=0).astype(int)
+					print(f"New raster clipped to {{village_name}}: {{new_data.shape}}")
+				else:
+					new_data = np.nan_to_num(src_new.read(1), nan=0).astype(int)
+					print(f"New raster shape: {{new_data.shape}}")
 
 		# Step 5: Compute cropland-to-built-up change
 		#   Cropland classes: 8 (single), 9 (single non-kharif), 10 (double), 11 (triple)
@@ -2172,38 +2312,12 @@ For multi-region layers: Read ALL URLs, concat GeoDataFrames, then analyze.
 			dst.write(crop_to_builtup, 1)
 		print(f"Change raster saved: ./exports/crop_to_builtup_change.tif")
 
-		# Step 8: Visualization PNG
-		import matplotlib
-		matplotlib.use('Agg')
-		import matplotlib.pyplot as plt
-		from matplotlib.colors import ListedColormap
+		print(f"\\nCropland to Built-up conversion: {{total_change_ha:.2f}} hectares")
 
-		fig, axes = plt.subplots(1, 3, figsize=(20, 7))
 
-		# Subplot 1: Old LULC
-		cmap_lulc = ListedColormap(['white', 'red', 'cyan', 'blue', 'darkblue', 'white',
-			'green', 'sandybrown', 'yellow', 'khaki', 'orange', 'darkgreen', 'olive'])
-		axes[0].imshow(old_data, cmap=cmap_lulc, vmin=0, vmax=12)
-		axes[0].set_title(f'LULC {{old_layer["layer_name"][:12]}}')
-		axes[0].axis('off')
 
-		# Subplot 2: New LULC
-		axes[1].imshow(new_data, cmap=cmap_lulc, vmin=0, vmax=12)
-		axes[1].set_title(f'LULC {{new_layer["layer_name"][:12]}}')
-		axes[1].axis('off')
+		final_answer(f"Cropland to built-up: {{total_change_ha:.2f}} hectares converted.\\nExports:\\n- Change raster: ./exports/crop_to_builtup_change.tif")
 
-		# Subplot 3: Change map (crop->built-up highlighted in red)
-		change_vis = np.zeros((*old_data.shape, 3), dtype=np.uint8)
-		change_vis[..., :] = 200  # light gray background
-		change_vis[crop_to_builtup == 1] = [255, 0, 0]  # red for crop->built-up
-		axes[2].imshow(change_vis)
-		axes[2].set_title(f'Crop to Built-up: {{total_change_ha:.1f}} ha')
-		axes[2].axis('off')
-
-		plt.suptitle(f'Cropland to Built-up Conversion\n{{LOCATION}}', fontsize=14)
-		plt.tight_layout()
-		plt.savefig('./exports/crop_to_builtup_change.png', dpi=200, bbox_inches='tight')
-		print(f"Visualization saved: ./exports/crop_to_builtup_change.png")
 
 		# EXAMPLE 3: DROUGHT + VILLAGE NAMES (Spatial Join with Admin Boundaries)
 		# Step 1: Find and load drought_frequency_vector
@@ -4173,47 +4287,21 @@ if __name__ == "__main__":
 	print("Bot TEST")
 	print("="*70)
 
-	print("Running query #1 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
-	print("="*70)
-	run_hybrid_agent("Could you show how cropping intensity has changed over the years in Shirur Village, Kundgol, Dharwad, Karnataka?")
-
-
-	# Create a single session ID to group all traces from this run
-	# _session_id = generate_session_id()
-	# print(f"📊 Langfuse session ID: {_session_id}")
-
 	# print("Running query #1 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
 	# print("="*70)
+	# run_hybrid_agent("Could you show how cropping intensity has changed over the years in Shirur Village, Kundgol, Dharwad, Karnataka?")
 
-	
+	# print("Running query #2 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+	# print("="*70)
+	# run_hybrid_agent("Could you show how surface water availability has changed over the years in Shirur Village, Kundgol, Dharwad, Karnataka?")
 
-# 	try:
-# 		result = run_hybrid_agent(
-# 			"Could you show how cropping intensity has changed over the years in Navalgund, Dharwad, Karnataka?",
-# 			session_id=_session_id,
-# 			user_id="dev-test",
-# 		)
+	print("Running query #3 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+	print("="*70)
+	run_hybrid_agent("Can you show me areas that have lost tree cover in Shirur Village, Kundgol, Dharwad, Karnataka since 2018? also hectares of degraded area?")
 
-# 		# ── Example: record user feedback after agent finishes ──
-# 		# In production this would come from a UI callback.
-# 		# score_trace(name="user_feedback", value=1.0, data_type="NUMERIC",
-# 		#             comment="Correct answer")
-
-# 	except Exception:
-# 		pass  # error already logged to Langfuse inside run_hybrid_agent
-
-# 	finally:
-# 		# Ensure all buffered events reach Langfuse before exit
-# 		lf_shutdown()
-
- 	
-# 	# print("Running query #3 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
-# 	# print("="*70)
-# 	# run_hybrid_agent("Can you show me areas that have lost tree cover in Navalgund, Dharwad, Karnataka since 2018? also hectares of degraded area?")
-
-# 	# print("Running query #4 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
-# 	# print("="*70)
-# 	# run_hybrid_agent("How much cropland in Navalgund, Dharwad, Karnataka has turned into built up since 2018? can you show me those regions?")
+	# print("Running query #4 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+	# print("="*70)
+	# run_hybrid_agent("How much cropland in Shirur Village, Kundgol, Dharwad, Karnataka has turned into built up since 2018?")
 
 # 	# print("Running query #5 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
 # 	# print("="*70)
