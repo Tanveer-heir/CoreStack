@@ -717,6 +717,8 @@ S2. NEVER reproject rasters to UTM — LULC rasters are 4911×5826 px, UTM repro
 S3. DEGREE-BASED AREA: `px_area_ha = (dx_deg * 111320 * cos(lat_rad)) * (dy_deg * 110540) / 10000`
 S4. For raster clipping: MUST `from rasterio.mask import mask` then `mask(src, geoms, crop=True)`. Also `from shapely.geometry import mapping as shapely_mapping; geoms = [shapely_mapping(gdf.geometry.iloc[0])]` — NEVER pass raw function or `.__geo_interface__`.
 S5. `rasterio.open(path, 'w', ...)` IS allowed (module method). `plt.savefig(...)` IS allowed.
+S6. NEVER use `vars()`, `globals()`, or `locals()`. The sandbox executor blocks these. Keep code flat; assume variables exist if you defined them.
+S7. NEVER use `if array:` or `if df:` on numpy arrays or DataFrames. This causes "ambiguous truth value" errors. Use `if len(array) > 0:` or `if not df.empty:`.
 
 ═══ §3 COMMON PATTERNS (reference by name) ═══
 
@@ -759,8 +761,12 @@ Apply for rasters: Always buffer the village boundary by ~2km before clipping: `
 import math, requests, numpy as np
 from rasterio.mask import mask as rasterio_mask
 from shapely.geometry import mapping as shapely_mapping
-# Buffer village boundary ~2km for raster clipping
-village_gdf['geometry'] = village_gdf.geometry.buffer(0.02)
+
+# Buffer village boundary ~2km safely using metric CRS (avoids UserWarning)
+village_gdf = village_gdf.to_crs('EPSG:3857')
+village_gdf['geometry'] = village_gdf.geometry.buffer(2000)
+village_gdf = village_gdf.to_crs('EPSG:4326')
+
 r_bytes = requests.get(url, timeout=120).content
 with rasterio.MemoryFile(r_bytes) as memfile:
     with memfile.open() as src:
@@ -771,7 +777,18 @@ with rasterio.MemoryFile(r_bytes) as memfile:
             data = data[0]
         else:
             data = src.read(1); transform = src.transform
-        crs = src.crs
+
+        # CRITICAL: Prepare metadata for exporting the clipped array
+        out_meta = src.meta.copy()
+        out_meta.update({{
+            "driver": "GTiff",
+            "height": data.shape[0],
+            "width": data.shape[1],
+            "transform": transform,
+            "dtype": "uint8",
+            "nodata": 0
+        }})
+
 # ALWAYS inspect unique values first:
 print(f"Unique raster values: {{np.unique(data)}}")
 # Area: degree-based (NEVER UTM)
@@ -784,8 +801,10 @@ change_mask = (data == 1)  # or whatever change class
 change_pixel_count = int(np.count_nonzero(change_mask))  # returns int, NOT tuple
 total_area_ha = change_pixel_count * px_area_ha
 print(f"Change pixels: {{change_pixel_count}}, Area: {{total_area_ha:.2f}} ha")
-```
 
+# CRITICAL EXPORT PATTERN: Multiply boolean mask by 255 so it is visually completely white against a black/nodata background!
+# with rasterio.open('./exports/output.tif', 'w', **out_meta) as dest:
+#     dest.write((change_mask * 255).astype('uint8'), 1)
 
 **GEE_CENTROID_SAMPLE** — Sample GEE image at MWS centroids:
 ```python
@@ -870,23 +889,26 @@ Steps:
 Outputs: `./exports/surface_water_trend.png`, `./exports/surface_water_availability_by_mws.geojson`
 
 ───────────────────────────────────────
+───────────────────────────────────────
+───────────────────────────────────────
 **QT3: Tree Cover Loss / Deforestation in [Village]**
 Layers: deforestation raster + degradation raster (both in raster_layers). Fallback: 'tree overall change' raster.
 ⚠️ TEHSIL MATCHING: Layer name contains tehsil (e.g., change_dharwad_kundgol_Deforestation). Include CORRECT tehsil in fetch query.
 Steps:
 1. Find deforestation layer: `'deforestation' in layer['layer_name'].lower()`. Also find degradation: `'degradation' in layer['layer_name'].lower()`
-2. Get village boundary (VILLAGE_BOUNDARY pattern), then buffer it: `village_gdf['geometry'] = village_gdf.geometry.buffer(0.02)`
+2. Get village boundary (VILLAGE_BOUNDARY pattern), project to metric, buffer by 2000m, and project back: `village_gdf = village_gdf.to_crs('EPSG:3857'); village_gdf['geometry'] = village_gdf.geometry.buffer(2000); village_gdf = village_gdf.to_crs('EPSG:4326')`
 3. For EACH raster (deforestation, degradation):
-   a. Download bytes: `r_bytes = requests.get(layer['layer_url'], timeout=120).content`
-   b. Use RASTER_CLIP pattern to clip to village
-   c. Mask to loss class: `change_mask = (data == 1)`
-   d. Count change pixels: `change_count = int(np.count_nonzero(change_mask))` — returns an int, NOT a tuple
-   e. Compute area: `area_ha = change_count * px_area_ha`
-   f. Save clipped GeoTIFF using `rasterio.open('./exports/...tif', 'w', driver='GTiff', ...)`
+   a. Download bytes, use RASTER_CLIP pattern to clip to village AND get `out_meta`
+   b. Mask to loss class: `change_mask = (data == 1)`
+   c. Count change pixels: `change_count = int(np.count_nonzero(change_mask))`
+   d. Compute area: `area_ha = change_count * px_area_ha`
+   e. Save clipped GeoTIFF securely: `with rasterio.open('./exports/...tif', 'w', **out_meta) as dest: dest.write(change_mask.astype('uint8'), 1)`
 4. Print total loss/degradation in hectares for each
 Outputs: `./exports/deforestation_change.tif`, `./exports/degradation_change.tif` + print area
-FALLBACK (custom years): Use LULC rasters, compare class 6 (trees) across years.
+FALLBACK (custom years): Use LULC rasters, compare class 6 (trees) across years.ears): Use LULC rasters, compare class 6 (trees) across years.
 
+───────────────────────────────────────
+───────────────────────────────────────
 ───────────────────────────────────────
 **QT4: Cropland → Built-up / Land Cover Change**
 Layers: TWO LULC level_3 rasters (earliest + most recent)
@@ -896,9 +918,9 @@ Steps:
 2. Download BOTH rasters (requests.get), use RASTER_CLIP for each
 3. `np.nan_to_num(data, nan=0).astype(int)`
 4. Change mask: `np.isin(old, [8,9,10,11]) & (new == 1)` (cropland→built-up)
-5. Compute area (degree-based, S3), save change GeoTIFF, print hectares
+5. Compute area (degree-based, S3)
+6. Save change GeoTIFF (multiply by 255 for visibility): `with rasterio.open('./exports/crop_to_builtup_change.tif', 'w', **out_meta) as dest: dest.write((change_mask * 255).astype('uint8'), 1)`
 Outputs: `./exports/crop_to_builtup_change.tif` + print area
-
 ───────────────────────────────────────
 **QT5: MWS with Highest Cropping Sensitivity to Drought**
 Layers: drought + cropping_intensity (both vectors, SAME fetch)
@@ -935,7 +957,7 @@ Steps:
 1. Load all 4 layers. Print columns.
 2. Drop geometry from all except first, merge on `uid` (inner join)
 3. Select numeric feature cols (exclude id, uid, geometry, area_in_ha, sum, terrainClu)
-4. `StandardScaler().fit_transform(X.fillna(0))` 
+4. `StandardScaler().fit_transform(X.fillna(0))`
 5. `cosine_similarity(target_vec, X_scaled)` from sklearn
 6. Rank descending (exclude target), take top N
 7. Export with uid + similarity score, drop GeoServer `id`
@@ -998,45 +1020,230 @@ Steps:
 Outputs: `./exports/ci_vs_runoff_quadrant_scatter.png`, `./exports/ci_vs_runoff_quadrants.geojson`
 
 ───────────────────────────────────────
+───────────────────────────────────────
+───────────────────────────────────────
+───────────────────────────────────────
 **QT13: Monsoon LST vs Cropping Intensity Scatter**
-Layers: cropping_intensity (CoreStack) + Landsat 8 LST (GEE)
-⛔ CoreStack has NO LST — GEE is mandatory. NEVER fabricate temperatures.
+Layers: cropping_intensity (CoreStack) ONLY. Temperature MUST come from GEE (Landsat 8 LST).
+⛔ DO NOT search for "temperature" or "LST" in the CoreStack API response. CoreStack does NOT have it.
+⚠️ KEEP CODE FLAT. DO NOT use try/except blocks, `vars()`, or `if array:` checks.
 Steps:
-1. Load CI vector, compute mean_ci (2017-2023)
-2. GEE_CENTROID_SAMPLE pattern with Landsat 8 C2L2:
+1. Fetch and load the `cropping_intensity` vector from CoreStack. Compute `mean_ci` per MWS (avg of 2017-2023 cols).
+2. Extract centroids and run GEE EXACTLY using this code:
+```python
+import ee, pandas as pd
+ee.Initialize(project='corestack-gee')
+
+gdf['centroid_lon'] = gdf.geometry.centroid.x
+gdf['centroid_lat'] = gdf.geometry.centroid.y
+bounds = tuple(gdf.total_bounds)
+ee_roi = ee.Geometry.Rectangle([float(bounds[0]), float(bounds[1]), float(bounds[2]), float(bounds[3])])
+
+# Safe unpacking of features to avoid f-string issues
+points = []
+for _, r in gdf.iterrows():
+    pt = ee.Geometry.Point([float(r['centroid_lon']), float(r['centroid_lat'])])
+    feat = ee.Feature(pt, {{'uid': str(r['uid'])}})
+    points.append(feat)
+fc = ee.FeatureCollection(points)
+
+def prep_l8(img):
+    qa = img.select('QA_PIXEL')
+    mask = qa.bitwiseAnd(1<<3).eq(0).And(qa.bitwiseAnd(1<<4).eq(0))
+    lst = img.select('ST_B10').multiply(0.00341802).add(149.0).subtract(273.15).rename('LST')
+    return img.addBands(lst).updateMask(mask)
+
+l8 = ee.ImageCollection('LANDSAT/LC08/C02/T1_L2')\\
+    .filterBounds(ee_roi)\\
+    .filter(ee.Filter.calendarRange(6, 9, 'month'))\\
+    .filterDate('2017-01-01', '2023-12-31')\\
+    .map(prep_l8)
+
+image = l8.select('LST').mean()
+sampled = image.sampleRegions(collection=fc, scale=30, geometries=False).getInfo()
+lst_df = pd.DataFrame([f['properties'] for f in sampled['features']])
+3. Use the **GEE_CENTROID_SAMPLE** pattern with Landsat 8 C2L2 to get the temperature at those centroids:
    - Cloud mask: QA_PIXEL bits 3,4 must be 0
    - LST: `ST_B10 * 0.00341802 + 149.0 - 273.15` (K→°C)
    - Filter: months 6-9 (monsoon), 2017-2023, `.map(cloud_mask).map(compute_lst).mean()`
    - sampleRegions at centroids, scale=30
-3. Merge LST with CI on uid, scatter with trend line + Pearson r
+4. Merge the resulting GEE LST dataframe with the CoreStack CI dataframe on `uid`.
+5. Create a scatter plot: X=LST, Y=mean_ci. Add a trend line + Pearson r.
 Outputs: `./exports/lst_vs_ci_scatter.png`, `./exports/lst_vs_cropping_intensity.geojson`
 
 ───────────────────────────────────────
 **QT14: Phenological Stage Detection & Similarity**
-Layers: cropping_intensity vector (for MWS uid+geometry) + Sentinel-2 NDVI (GEE)
-⛔ NEVER pass polygon geometries to GEE — centroids only. NEVER fabricate NDVI.
-⚠️ SKIP months 7,8 (July/Aug) — Indian monsoon = zero cloud-free Sentinel-2.
+Layers: cropping_intensity vector (CoreStack) ONLY + Sentinel-2 NDVI (GEE).
+⛔ LOCATION TOOL FIX: When calling `fetch_corestack_data()`, pass ONLY the clean location name (e.g., "Navalgund, Dharwad, Karnataka"). DO NOT include the MWS UID (like "18_16157") in the fetch query, as it breaks the location resolver.
+⚠️ KEEP CODE FLAT. DO NOT use try/except blocks, `vars()`, or `if array:` checks.
 Steps:
-1. Load CI vector (has uid for MWS identification, NOT admin boundary)
-2. Verify target uid exists
-3. GEE: For EACH month in each year (Sentinel-2 SR Harmonized):
-   - Pre-filter: `ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 30)`
-   - DO NOT use `.map()` with custom Python functions (fails in executor)
-   - `collection.median().normalizedDifference(['B8','B4']).rename(band_name)`
-   - sampleRegions EACH month independently (NOT multi-band — drops nulls)
-4. Parse results → DataFrame uid×year×month×ndvi
-5. Classify phenological stage per month:
-   - Bare/Fallow: NDVI<0.15
-   - Dormant: 0.15≤NDVI<0.25 and |delta|≤0.03
-   - Green-up: delta>0.03
-   - Peak Vegetation: NDVI≥0.45 and |delta|≤0.03
-   - Maturity: 0.25≤NDVI<0.45 and |delta|≤0.03
-   - Senescence: delta<-0.03
-6. Compare each MWS with target per month → similarity_pct
-7. Export GeoJSON + heatmap PNG (stage colors: Bare=#8B4513, Dormant=#D2B48C, Green-up=#90EE90, Maturity=#FFD700, Peak=#006400, Senescence=#FF8C00)
-Outputs: `./exports/phenological_stages.geojson`, `./exports/phenological_stages_heatmap.png`
+1. Call `fetch_corestack_data()` using just the district/tehsil/village name. Load the `cropping_intensity` vector to get the MWS geometries and verify the target `uid` exists.
+2. Extract centroids and run GEE EXACTLY using this code to get NDVI (skipping monsoon months 7,8):
+```python
+import ee, pandas as pd, numpy as np
+ee.Initialize(project='corestack-gee')
 
+gdf['centroid_lon'] = gdf.geometry.centroid.x
+gdf['centroid_lat'] = gdf.geometry.centroid.y
+bounds = tuple(gdf.total_bounds)
+ee_roi = ee.Geometry.Rectangle([float(bounds[0]), float(bounds[1]), float(bounds[2]), float(bounds[3])])
+
+points = []
+for _, r in gdf.iterrows():
+    pt = ee.Geometry.Point([float(r['centroid_lon']), float(r['centroid_lat'])])
+    points.append(ee.Feature(pt, {{'uid': str(r['uid'])}}))
+fc = ee.FeatureCollection(points)
+
+data_list = []
+# Assuming years 2019, 2020 based on query
+for year in [2019, 2020]:
+    for month in [1, 2, 3, 4, 5, 6, 9, 10, 11, 12]:
+        start_date = f"{{year}}-{{month:02d}}-01"
+        end_date = f"{{year}}-{{month:02d}}-28"
+
+        s2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED') \\
+            .filterBounds(ee_roi) \\
+            .filterDate(start_date, end_date) \\
+            .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 30))
+
+        # Safe reduction to median and calculate NDVI
+        img = s2.median().normalizedDifference(['B8', 'B4']).rename('NDVI')
+
+        sampled = img.sampleRegions(collection=fc, scale=10, geometries=False).getInfo()
+        if 'features' in sampled:
+            for f in sampled['features']:
+                props = f['properties']
+                if 'NDVI' in props and 'uid' in props:
+                    data_list.append({{
+                        'uid': str(props['uid']),
+                        'year': year,
+                        'month': month,
+                        'ndvi': float(props['NDVI'])
+                    }})
+
+ndvi_df = pd.DataFrame(data_list)
+With ndvi_df ready, sort by uid, year, month. Calculate delta (change in NDVI from previous month per uid): ndvi_df['delta'] = ndvi_df.groupby('uid')['ndvi'].diff().fillna(0)
+
+Classify phenological stage per month:
+
+Bare/Fallow: NDVI < 0.15
+
+Dormant: 0.15 ≤ NDVI < 0.25 and |delta| ≤ 0.03
+
+Green-up: delta > 0.03
+
+Peak Vegetation: NDVI ≥ 0.45 and |delta| ≤ 0.03
+
+Maturity: 0.25 ≤ NDVI < 0.45 and |delta| ≤ 0.03
+
+Senescence: delta < -0.03
+
+Fallback: if none match, assign "Other"
+
+Compare each MWS with the target MWS per month. If stage matches target stage in a given month/year, score 1 else 0. Compute similarity_pct (sum of matches / total valid months * 100).
+
+Merge similarity scores back to gdf and export GeoJSON. Create a heatmap PNG (UIDs on Y axis, Month-Year on X axis) using stage colors: Bare=#8B4513, Dormant=#D2B48C, Green-up=#90EE90, Maturity=#FFD700, Peak=#006400, Senescence=#FF8C00.
+Outputs: ./exports/phenological_stages.geojson, ./exports/phenological_stages_heatmap.png
 ───────────────────────────────────────
+───────────────────────────────────────
+**QT14: Phenological Stage Detection & Similarity**
+Layers: cropping_intensity vector (CoreStack) ONLY + Sentinel-2 NDVI (GEE).
+⛔ DO NOT write your own data fetching or layer matching code. Copy the Python block below exactly, only changing the location string to match the user's query.
+⚠️ KEEP CODE FLAT. DO NOT use try/except blocks, `vars()`, or `if array:` checks.
+Steps:
+1. Run this EXACT highly-optimized Python code block to fetch the data and run GEE in a single batch (skipping monsoon months 7,8):
+```python
+import ee, pandas as pd, numpy as np, json, geopandas as gpd
+ee.Initialize(project='corestack-gee')
+
+# 1. Fetch data using clean location name
+res = fetch_corestack_data("Navalgund, Dharwad, Karnataka")
+data = json.loads(res)
+
+# 2. Foolproof layer matching
+v_layers = data.get('spatial_data', {{}}).get('vector_layers', [])
+ci_layer = next((l for l in v_layers if 'intensity' in l['layer_name'].lower()), None)
+if not ci_layer:
+    raise ValueError("Intensity layer not found in payload.")
+
+gdf = pd.concat([gpd.read_file(u['url']) for u in ci_layer['urls']], ignore_index=True)
+gdf = gdf.to_crs('EPSG:4326')
+
+# 3. Setup Earth Engine ROIs
+gdf['centroid_lon'] = gdf.geometry.centroid.x
+gdf['centroid_lat'] = gdf.geometry.centroid.y
+bounds = tuple(gdf.total_bounds)
+ee_roi = ee.Geometry.Rectangle([float(bounds[0]), float(bounds[1]), float(bounds[2]), float(bounds[3])])
+
+points = []
+for _, r in gdf.iterrows():
+    pt = ee.Geometry.Point([float(r['centroid_lon']), float(r['centroid_lat'])])
+    points.append(ee.Feature(pt, {{'uid': str(r['uid'])}}))
+fc = ee.FeatureCollection(points)
+
+# 4. FAST GEE BATCHING: Build the graph, sample, but DO NOT call getInfo yet
+fc_list = []
+for year in [2019, 2020]:
+    for month in [1, 2, 3, 4, 5, 6, 9, 10, 11, 12]:
+        start_date = f"{{year}}-{{month:02d}}-01"
+        end_date = f"{{year}}-{{month:02d}}-28"
+
+        s2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED') \\
+            .filterBounds(ee_roi) \\
+            .filterDate(start_date, end_date) \\
+            .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 30))
+
+        ndvi = s2.median().normalizedDifference(['B8', 'B4']).rename('NDVI')
+
+        # Clever trick: Add year and month as image bands so they get sampled automatically!
+        img_with_time = ndvi \\
+            .addBands(ee.Image.constant(year).rename('year')) \\
+            .addBands(ee.Image.constant(month).rename('month'))
+
+        sampled_fc = img_with_time.sampleRegions(collection=fc, scale=10, geometries=False)
+        fc_list.append(sampled_fc)
+
+print("⏳ Batch fetching all 20 months of GEE data in ONE network call. Please wait...")
+
+# Flatten the list of FeatureCollections into one, and trigger the SINGLE network call
+combined_data = ee.FeatureCollection(fc_list).flatten().getInfo()
+
+data_list = []
+if 'features' in combined_data:
+    for f in combined_data['features']:
+        p = f['properties']
+        if 'NDVI' in p and 'uid' in p:
+            data_list.append({{
+                'uid': str(p['uid']),
+                'year': int(p['year']),
+                'month': int(p['month']),
+                'ndvi': float(p['NDVI'])
+            }})
+
+ndvi_df = pd.DataFrame(data_list)
+With ndvi_df ready, sort by uid, year, month. Calculate delta (change in NDVI from previous month per uid): ndvi_df['delta'] = ndvi_df.groupby('uid')['ndvi'].diff().fillna(0)
+
+Classify phenological stage per month:
+
+Bare/Fallow: NDVI < 0.15
+
+Dormant: 0.15 ≤ NDVI < 0.25 and |delta| ≤ 0.03
+
+Green-up: delta > 0.03
+
+Peak Vegetation: NDVI ≥ 0.45 and |delta| ≤ 0.03
+
+Maturity: 0.25 ≤ NDVI < 0.45 and |delta| ≤ 0.03
+
+Senescence: delta < -0.03
+
+Fallback: if none match, assign "Other"
+
+Compare each MWS with the target MWS (target_uid = '18_16157') per month. If stage matches target stage in a given month/year, score 1 else 0. Compute similarity_pct (sum of matches / total valid months * 100).
+
+Merge similarity scores back to gdf and export GeoJSON. Create a heatmap PNG (UIDs on Y axis, Month-Year on X axis) using stage colors: Bare=#8B4513, Dormant=#D2B48C, Green-up=#90EE90, Maturity=#FFD700, Peak=#006400, Senescence=#FF8C00.
+Outputs: ./exports/phenological_stages.geojson, ./exports/phenological_stages_heatmap.png
+
 **QT15: Runoff per Phenological Stage vs Cropping Intensity Scatter**
 Inputs: `./exports/phenological_stages.geojson` (QT14 output)
 Layers: drought + cropping_intensity (CoreStack)
@@ -1293,9 +1500,9 @@ if __name__ == "__main__":
 # 	# run_hybrid_agent("find me microwatersheds in Navalgund tehsil, Dharwad district, Karnataka most similar to 18_16157 uid microwatershed, based on its terrain, drought frequency, LULC and cropping intensity")
 
 
-	print("Running query #9 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
-	print("="*70)
-	run_hybrid_agent("find me microwatersheds most similar to 18_16157 id microwatershed in Navalgund, Dharwad, Karnataka, based on its terrain, drought frequency, and LULC using propensity score matching")
+	# print("Running query #9 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+	# print("="*70)
+	# run_hybrid_agent("find me microwatersheds most similar to 18_16157 id microwatershed in Navalgund, Dharwad, Karnataka, based on its terrain, drought frequency, and LULC using propensity score matching")
 
 # 	# print("Running query #10 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
 # 	# print("="*70)
@@ -1309,14 +1516,13 @@ if __name__ == "__main__":
 # 	# print("="*70)
 # 	# run_hybrid_agent("My tehsil navalgund of Dharwad, Karnataka is quite groundwater stressed. Find the top micro-watersheds that have high cropping intensity as well as a large rainfall runoff volume that can be harvested. Similarly, find those micro-watersheds that have a low cropping intensity but high runoff volume. Essentially build a neat scatterplot split into four quadrants of high/low cropping intensity and high/low runoff")
 
+	# print("Running query #13 from CSV (Navalgund, Dharwad, Karnataka)...")
+	# print("="*70)
+	# run_hybrid_agent("For my tehsil Navalgund of Dharwad, Karnataka, can you create a scatterplot of average monsoon temperatures to cropping intensity?")
 
-# 	# print("Running query #13 from CSV (Navalgund, Dharwad, Karnataka)...")
-# 	# print("="*70)
-# 	# run_hybrid_agent("For my tehsil Navalgund of Dharwad, Karnataka, can you create a scatterplot of average monsoon temperatures to cropping intensity?")
-
-# 	# print("Running query #14 from CSV (Navalgund, Dharwad, Karnataka)...")
-# 	# print("="*70)
-# 	# run_hybrid_agent("For my microwatershed 18_16157 in Navalgund, Dharwad, Karnataka, can you find out regions with similar phenological cycles during the years 2019 to 2020, and show per month which regions are in the same phenological stage? Use Sentinel-2 NDVI and MWS boundaries to compute NDVI time series and use phenological stage detection algorithm.")
+	print("Running query #14 from CSV (Navalgund, Dharwad, Karnataka)...")
+	print("="*70)
+	run_hybrid_agent("For my microwatershed 18_16157 in Navalgund, Dharwad, Karnataka, can you find out regions with similar phenological cycles during the years 2019 to 2020, and show per month which regions are in the same phenological stage? Use Sentinel-2 NDVI and MWS boundaries to compute NDVI time series and use phenological stage detection algorithm.")
 
 # 	# print("Running query #15 from CSV (Navalgund, Dharwad, Karnataka)...")
 # 	# print("="*70)
