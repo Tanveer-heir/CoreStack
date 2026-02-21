@@ -1509,10 +1509,10 @@ if __name__ == "__main__":
 	# print("="*70)
 	# run_hybrid_agent("How much cropland in Shirur Village, Kundgol, Dharwad, Karnataka has turned into built up since 2018?")
 
-# 	# print("Running query #5 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
-# 	# print("="*70)
-# 	# run_hybrid_agent("Which villages in Navalgund, Dharwad Karnataka among the ones available on Core Stack have experienced droughts? ")
-
+	# print("Running query #5 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+	# print("="*70)
+	# run_hybrid_agent("Which villages in Navalgund, Dharwad Karnataka among the ones available on Core Stack have experienced droughts? ")
+#
 # 	# print("Running query #6 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
 # 	# print("="*70)
 # 	# run_hybrid_agent("find all microwatersheds in Navalgund tehsil, Dharwad district in Karnataka, with highest cropping senstivity to drought")
@@ -1522,9 +1522,9 @@ if __name__ == "__main__":
 	# run_hybrid_agent("find all microwatersheds in Navalgund tehsil, Dharwad district in Karnataka, with highest surface water availability senstivity to drought")
 
 
-# 	# print("Running query #8 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
-# 	# print("="*70)
-# 	# run_hybrid_agent("find me microwatersheds in Navalgund tehsil, Dharwad district, Karnataka most similar to 18_16157 uid microwatershed, based on its terrain, drought frequency, LULC and cropping intensity")
+	# print("Running query #8 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
+	# print("="*70)
+	# run_hybrid_agent("find me microwatersheds in Navalgund tehsil, Dharwad district, Karnataka most similar to 18_16157 uid microwatershed, based on its terrain, drought frequency, LULC and cropping intensity")
 
 
 	# print("Running query #9 from CSV (Navalgund, Dharwad, Karnataka - correct coords)...")
@@ -1555,11 +1555,11 @@ if __name__ == "__main__":
 	# print("="*70)
 	# run_hybrid_agent("For the microwatersheds in Navalgund, Dharwad, Karnataka identified in the phenological stage analysis, create a scatterplot of runoff accumulation per phenological stage vs cropping intensity. Use the Drought vector rd columns for weekly runoff data, sum them per month, then accumulate per phenological stage per MWS. Plot against cropping intensity from the Cropping Intensity vector for years 2019-2020. Color by phenological stage.")
 
-	# print("Running query #16 from CSV (Navalgund, Dharwad, Karnataka)...")
+	# print("Running query 16 from CSV (Navalgund, Dharwad, Karnataka)...")
 	# print("="*70)
 	# run_hybrid_agent("For my Navalgund tehsil in Dharwad, Karnataka, test the hypothesis that villages with higher average temperature have higher cropping intensity. Compute per-MWS average Land Surface Temperature from Landsat 8 and cropping intensity from CoreStack, build a scatterplot, and perform hypothesis testing (Pearson correlation + t-test on hot vs cool groups).")
 
-	print("Running query #17 from CSV (Navalgund, Dharwad, Karnataka)...")
-	print("="*70)
-	run_hybrid_agent("For my Navalgund tehsil in Dharwad, Karnataka, rank microwatersheds by a composite Agricultural Suitability Index considering temperature (Landsat 8 LST), cropping intensity (CoreStack CI vector), and surface water availability during the growing phenological stage (kharif season from Surface Water Bodies vector). Use weighted linear combination: ASI = 0.40*CI_norm + 0.30*(1-LST_norm) + 0.30*SW_norm. Export ranked bar chart and GeoJSON.")
+	# print("Running query #17 from CSV (Navalgund, Dharwad, Karnataka)...")
+	# print("="*70)
+	# run_hybrid_agent("For my Navalgund tehsil in Dharwad, Karnataka, rank microwatersheds by a composite Agricultural Suitability Index considering temperature (Landsat 8 LST), cropping intensity (CoreStack CI vector), and surface water availability during the growing phenological stage (kharif season from Surface Water Bodies vector). Use weighted linear combination: ASI = 0.40*CI_norm + 0.30*(1-LST_norm) + 0.30*SW_norm. Export ranked bar chart and GeoJSON.")
 
