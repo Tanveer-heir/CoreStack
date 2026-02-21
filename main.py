@@ -17,7 +17,14 @@ from contextlib import redirect_stdout
 
 # Suppress GeoPandas/Shapely geographic CRS centroid warning
 # (agent-generated code computes centroids in WGS84 for GEE point sampling — acceptable accuracy)
+import warnings
 warnings.filterwarnings("ignore", message=".*Geometry is in a geographic CRS.*centroid.*")
+from cryptography.utils import CryptographyDeprecationWarning
+
+warnings.filterwarnings("ignore", category=CryptographyDeprecationWarning)
+
+import matplotlib
+matplotlib.use("Agg")  # 🔥 CRITICAL FIX
 
 from dotenv import load_dotenv
 
@@ -1074,80 +1081,6 @@ Outputs: `./exports/lst_vs_ci_scatter.png`, `./exports/lst_vs_cropping_intensity
 ───────────────────────────────────────
 **QT14: Phenological Stage Detection & Similarity**
 Layers: cropping_intensity vector (CoreStack) ONLY + Sentinel-2 NDVI (GEE).
-⛔ LOCATION TOOL FIX: When calling `fetch_corestack_data()`, pass ONLY the clean location name (e.g., "Navalgund, Dharwad, Karnataka"). DO NOT include the MWS UID (like "18_16157") in the fetch query, as it breaks the location resolver.
-⚠️ KEEP CODE FLAT. DO NOT use try/except blocks, `vars()`, or `if array:` checks.
-Steps:
-1. Call `fetch_corestack_data()` using just the district/tehsil/village name. Load the `cropping_intensity` vector to get the MWS geometries and verify the target `uid` exists.
-2. Extract centroids and run GEE EXACTLY using this code to get NDVI (skipping monsoon months 7,8):
-```python
-import ee, pandas as pd, numpy as np
-ee.Initialize(project='corestack-gee')
-
-gdf['centroid_lon'] = gdf.geometry.centroid.x
-gdf['centroid_lat'] = gdf.geometry.centroid.y
-bounds = tuple(gdf.total_bounds)
-ee_roi = ee.Geometry.Rectangle([float(bounds[0]), float(bounds[1]), float(bounds[2]), float(bounds[3])])
-
-points = []
-for _, r in gdf.iterrows():
-    pt = ee.Geometry.Point([float(r['centroid_lon']), float(r['centroid_lat'])])
-    points.append(ee.Feature(pt, {{'uid': str(r['uid'])}}))
-fc = ee.FeatureCollection(points)
-
-data_list = []
-# Assuming years 2019, 2020 based on query
-for year in [2019, 2020]:
-    for month in [1, 2, 3, 4, 5, 6, 9, 10, 11, 12]:
-        start_date = f"{{year}}-{{month:02d}}-01"
-        end_date = f"{{year}}-{{month:02d}}-28"
-
-        s2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED') \\
-            .filterBounds(ee_roi) \\
-            .filterDate(start_date, end_date) \\
-            .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 30))
-
-        # Safe reduction to median and calculate NDVI
-        img = s2.median().normalizedDifference(['B8', 'B4']).rename('NDVI')
-
-        sampled = img.sampleRegions(collection=fc, scale=10, geometries=False).getInfo()
-        if 'features' in sampled:
-            for f in sampled['features']:
-                props = f['properties']
-                if 'NDVI' in props and 'uid' in props:
-                    data_list.append({{
-                        'uid': str(props['uid']),
-                        'year': year,
-                        'month': month,
-                        'ndvi': float(props['NDVI'])
-                    }})
-
-ndvi_df = pd.DataFrame(data_list)
-With ndvi_df ready, sort by uid, year, month. Calculate delta (change in NDVI from previous month per uid): ndvi_df['delta'] = ndvi_df.groupby('uid')['ndvi'].diff().fillna(0)
-
-Classify phenological stage per month:
-
-Bare/Fallow: NDVI < 0.15
-
-Dormant: 0.15 ≤ NDVI < 0.25 and |delta| ≤ 0.03
-
-Green-up: delta > 0.03
-
-Peak Vegetation: NDVI ≥ 0.45 and |delta| ≤ 0.03
-
-Maturity: 0.25 ≤ NDVI < 0.45 and |delta| ≤ 0.03
-
-Senescence: delta < -0.03
-
-Fallback: if none match, assign "Other"
-
-Compare each MWS with the target MWS per month. If stage matches target stage in a given month/year, score 1 else 0. Compute similarity_pct (sum of matches / total valid months * 100).
-
-Merge similarity scores back to gdf and export GeoJSON. Create a heatmap PNG (UIDs on Y axis, Month-Year on X axis) using stage colors: Bare=#8B4513, Dormant=#D2B48C, Green-up=#90EE90, Maturity=#FFD700, Peak=#006400, Senescence=#FF8C00.
-Outputs: ./exports/phenological_stages.geojson, ./exports/phenological_stages_heatmap.png
-───────────────────────────────────────
-───────────────────────────────────────
-**QT14: Phenological Stage Detection & Similarity**
-Layers: cropping_intensity vector (CoreStack) ONLY + Sentinel-2 NDVI (GEE).
 ⛔ DO NOT write your own data fetching or layer matching code. Copy the Python block below exactly, only changing the location string to match the user's query.
 ⚠️ KEEP CODE FLAT. DO NOT use try/except blocks, `vars()`, or `if array:` checks.
 Steps:
@@ -1244,6 +1177,7 @@ Compare each MWS with the target MWS (target_uid = '18_16157') per month. If sta
 Merge similarity scores back to gdf and export GeoJSON. Create a heatmap PNG (UIDs on Y axis, Month-Year on X axis) using stage colors: Bare=#8B4513, Dormant=#D2B48C, Green-up=#90EE90, Maturity=#FFD700, Peak=#006400, Senescence=#FF8C00.
 Outputs: ./exports/phenological_stages.geojson, ./exports/phenological_stages_heatmap.png
 
+───────────────────────────────────────
 **QT15: Runoff per Phenological Stage vs Cropping Intensity Scatter**
 Inputs: `./exports/phenological_stages.geojson` (QT14 output)
 Layers: drought + cropping_intensity (CoreStack)
@@ -1258,20 +1192,113 @@ Outputs: `./exports/runoff_vs_ci_by_phenostage.png`, `./exports/runoff_vs_ci_by_
 
 ───────────────────────────────────────
 **QT16: Hypothesis Test — LST vs Cropping Intensity**
-Layers: cropping_intensity (CoreStack) + Landsat 8 LST (GEE, ALL months 2017-2023)
-⚠️ DO NOT add try/except. Keep FLAT code structure.
+Layers: cropping_intensity vector (CoreStack) ONLY + Landsat 8 LST (GEE).
+⛔ DO NOT write your own data fetching or layer matching code. Copy the Python block below exactly, only changing the location string to match the user's query.
+⚠️ KEEP CODE FLAT. DO NOT use try/except blocks, `vars()`, or `if array:` checks.
 Steps:
-1. Load CI, compute mean_ci (2017-2023)
-2. GEE_CENTROID_SAMPLE: Landsat 8 C2L2, ALL months (not just monsoon), cloud-masked, .mean()
-3. Merge LST+CI on uid
-4. Hypothesis testing:
-   a. `pearsonr(LST, CI)` → r, p
-   b. Split at median LST → Hot/Cool groups
-   c. `ttest_ind(hot_ci, cool_ci, equal_var=False)` → Welch's t
-   d. Cohen's d = (mean_hot - mean_cool) / pooled_std
-5. Scatter colored by Hot/Cool, regression line, vertical line at median LST, annotation box with r,p,t,d
-Outputs: `./exports/lst_ci_hypothesis_test.png`, `./exports/lst_ci_hypothesis_test.geojson`
+1. Run this EXACT Python code block to fetch data, run GEE (optimized for speed), perform hypothesis testing, and save the exports:
+```python
+import ee, pandas as pd, numpy as np, json, geopandas as gpd, matplotlib.pyplot as plt
+from scipy.stats import pearsonr, ttest_ind
+ee.Initialize(project='corestack-gee')
 
+# 1. Fetch data
+res = fetch_corestack_data("Navalgund, Dharwad, Karnataka") # Change location if needed
+data = json.loads(res)
+
+# 2. Foolproof layer matching
+v_layers = data.get('spatial_data', {{}}).get('vector_layers', [])
+ci_layer = next((l for l in v_layers if 'intensity' in l['layer_name'].lower()), None)
+if not ci_layer:
+    raise ValueError("Intensity layer not found in payload.")
+
+gdf = pd.concat([gpd.read_file(u['url']) for u in ci_layer['urls']], ignore_index=True)
+gdf = gdf.to_crs('EPSG:4326')
+
+# Compute mean_ci (average of 2017-2023)
+ci_cols = [c for c in gdf.columns if 'cropping_intensity_' in c.lower() and any(str(y) in c for y in range(2017, 2024))]
+gdf['mean_ci'] = gdf[ci_cols].mean(axis=1)
+
+# 3. Setup Earth Engine ROIs
+gdf['centroid_lon'] = gdf.geometry.centroid.x
+gdf['centroid_lat'] = gdf.geometry.centroid.y
+bounds = tuple(gdf.total_bounds)
+ee_roi = ee.Geometry.Rectangle([float(bounds[0]), float(bounds[1]), float(bounds[2]), float(bounds[3])])
+
+points = []
+for _, r in gdf.iterrows():
+    pt = ee.Geometry.Point([float(r['centroid_lon']), float(r['centroid_lat'])])
+    points.append(ee.Feature(pt, {{'uid': str(r['uid'])}}))
+fc = ee.FeatureCollection(points)
+
+def prep_l8(img):
+    qa = img.select('QA_PIXEL')
+    mask = qa.bitwiseAnd(1<<3).eq(0).And(qa.bitwiseAnd(1<<4).eq(0))
+    lst = img.select('ST_B10').multiply(0.00341802).add(149.0).subtract(273.15).rename('LST')
+    return img.addBands(lst).updateMask(mask)
+
+l8 = ee.ImageCollection('LANDSAT/LC08/C02/T1_L2') \\
+    .filterBounds(ee_roi) \\
+    .filterDate('2017-01-01', '2023-12-31') \\
+    .map(prep_l8)
+
+print("⏳ Fast-sampling GEE LST for all months 2017-2023 at 250m scale...")
+image = l8.select('LST').mean()
+# CRITICAL SPEED FIX: scale=250 drastically reduces GEE compute time
+sampled = image.sampleRegions(collection=fc, scale=250, geometries=False).getInfo()
+
+lst_data = []
+if 'features' in sampled:
+    for f in sampled['features']:
+        p = f['properties']
+        if 'LST' in p and 'uid' in p:
+            lst_data.append({{'uid': str(p['uid']), 'LST': float(p['LST'])}})
+
+lst_df = pd.DataFrame(lst_data)
+
+# 4. Merge Data
+gdf['uid'] = gdf['uid'].astype(str)
+merged = pd.merge(gdf, lst_df, on='uid', how='inner').dropna(subset=['LST', 'mean_ci'])
+
+# 5. Hypothesis Testing
+lst_arr = merged['LST'].values
+ci_arr = merged['mean_ci'].values
+r, p_corr = pearsonr(lst_arr, ci_arr)
+
+median_lst = np.median(lst_arr)
+merged['Group'] = np.where(merged['LST'] > median_lst, 'Hot', 'Cool')
+hot = merged[merged['Group'] == 'Hot']['mean_ci'].values
+cool = merged[merged['Group'] == 'Cool']['mean_ci'].values
+
+t_stat, p_val_t = ttest_ind(hot, cool, equal_var=False)
+
+nx, ny = len(hot), len(cool)
+dof = nx + ny - 2
+pooled_std = np.sqrt(((nx-1)*np.var(hot, ddof=1) + (ny-1)*np.var(cool, ddof=1)) / dof)
+cohens_d = (np.mean(hot) - np.mean(cool)) / pooled_std
+
+# 6. Plotting and Exports
+plt.figure(figsize=(10, 6))
+colors = {{'Hot': 'red', 'Cool': 'blue'}}
+plt.scatter(merged['LST'], merged['mean_ci'], c=merged['Group'].map(colors), alpha=0.6)
+
+# Trend line
+z = np.polyfit(lst_arr, ci_arr, 1)
+p_poly = np.poly1d(z)
+plt.plot(lst_arr, p_poly(lst_arr), "k--", alpha=0.7)
+
+plt.axvline(median_lst, color='gray', linestyle=':', label='Median LST')
+
+stats_text = f"Pearson r: {{r:.2f}} (p={{p_corr:.3f}})\\nWelch t: {{t_stat:.2f}} (p={{p_val_t:.3f}})\\nCohen's d: {{cohens_d:.2f}}"
+plt.annotate(stats_text, xy=(0.05, 0.95), xycoords='axes fraction', verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+
+plt.xlabel('Land Surface Temperature (°C)')
+plt.ylabel('Mean Cropping Intensity (%)')
+plt.title('LST vs Cropping Intensity (2017-2023)')
+
+plt.savefig('./exports/lst_ci_hypothesis_test.png')
+merged.to_file('./exports/lst_ci_hypothesis_test.geojson', driver='GeoJSON')
+print("✅ Successfully exported plot and GeoJSON.")
 ───────────────────────────────────────
 **QT17: Agricultural Suitability Index (ASI) Ranking**
 Layers: cropping_intensity + surface_water_bodies (CoreStack) + Landsat 8 LST (GEE)
@@ -1520,19 +1547,19 @@ if __name__ == "__main__":
 	# print("="*70)
 	# run_hybrid_agent("For my tehsil Navalgund of Dharwad, Karnataka, can you create a scatterplot of average monsoon temperatures to cropping intensity?")
 
-	print("Running query #14 from CSV (Navalgund, Dharwad, Karnataka)...")
-	print("="*70)
-	run_hybrid_agent("For my microwatershed 18_16157 in Navalgund, Dharwad, Karnataka, can you find out regions with similar phenological cycles during the years 2019 to 2020, and show per month which regions are in the same phenological stage? Use Sentinel-2 NDVI and MWS boundaries to compute NDVI time series and use phenological stage detection algorithm.")
+	# print("Running query #14 from CSV (Navalgund, Dharwad, Karnataka)...")
+	# print("="*70)
+	# run_hybrid_agent("For my microwatershed 18_16157 in Navalgund, Dharwad, Karnataka, can you find out regions with similar phenological cycles during the years 2019 to 2020, and show per month which regions are in the same phenological stage? Use Sentinel-2 NDVI and MWS boundaries to compute NDVI time series and use phenological stage detection algorithm.")
 
-# 	# print("Running query #15 from CSV (Navalgund, Dharwad, Karnataka)...")
-# 	# print("="*70)
-# 	# run_hybrid_agent("For the microwatersheds in Navalgund, Dharwad, Karnataka identified in the phenological stage analysis, create a scatterplot of runoff accumulation per phenological stage vs cropping intensity. Use the Drought vector rd columns for weekly runoff data, sum them per month, then accumulate per phenological stage per MWS. Plot against cropping intensity from the Cropping Intensity vector for years 2019-2020. Color by phenological stage.")
+	# print("Running query #15 from CSV (Navalgund, Dharwad, Karnataka)...")
+	# print("="*70)
+	# run_hybrid_agent("For the microwatersheds in Navalgund, Dharwad, Karnataka identified in the phenological stage analysis, create a scatterplot of runoff accumulation per phenological stage vs cropping intensity. Use the Drought vector rd columns for weekly runoff data, sum them per month, then accumulate per phenological stage per MWS. Plot against cropping intensity from the Cropping Intensity vector for years 2019-2020. Color by phenological stage.")
 
 	# print("Running query #16 from CSV (Navalgund, Dharwad, Karnataka)...")
 	# print("="*70)
 	# run_hybrid_agent("For my Navalgund tehsil in Dharwad, Karnataka, test the hypothesis that villages with higher average temperature have higher cropping intensity. Compute per-MWS average Land Surface Temperature from Landsat 8 and cropping intensity from CoreStack, build a scatterplot, and perform hypothesis testing (Pearson correlation + t-test on hot vs cool groups).")
 
-# 	# print("Running query #17 from CSV (Navalgund, Dharwad, Karnataka)...")
-# 	# print("="*70)
-# 	# run_hybrid_agent("For my Navalgund tehsil in Dharwad, Karnataka, rank microwatersheds by a composite Agricultural Suitability Index considering temperature (Landsat 8 LST), cropping intensity (CoreStack CI vector), and surface water availability during the growing phenological stage (kharif season from Surface Water Bodies vector). Use weighted linear combination: ASI = 0.40*CI_norm + 0.30*(1-LST_norm) + 0.30*SW_norm. Export ranked bar chart and GeoJSON.")
+	print("Running query #17 from CSV (Navalgund, Dharwad, Karnataka)...")
+	print("="*70)
+	run_hybrid_agent("For my Navalgund tehsil in Dharwad, Karnataka, rank microwatersheds by a composite Agricultural Suitability Index considering temperature (Landsat 8 LST), cropping intensity (CoreStack CI vector), and surface water availability during the growing phenological stage (kharif season from Surface Water Bodies vector). Use weighted linear combination: ASI = 0.40*CI_norm + 0.30*(1-LST_norm) + 0.30*SW_norm. Export ranked bar chart and GeoJSON.")
 
